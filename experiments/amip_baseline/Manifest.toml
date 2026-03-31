@@ -1093,7 +1093,7 @@ version = "0.14.14"
     [deps.NCDatasets.weakdeps]
     MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 
-[[deps.NN_Condensate_Distributions]]
+[[deps.MLCondensateDistributions]]
 deps = ["Arrow", "DataFrames", "DimensionalData", "HTTP", "Lux", "NCDatasets", "OhMyThreads", "Optimisers", "Random", "SimpleChains", "Thermodynamics", "Zarr", "Zygote"]
 path = "../.."
 uuid = "7c54ba8f-093f-4729-83e1-3e38b97e2ff2"

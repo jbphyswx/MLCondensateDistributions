@@ -1,5 +1,5 @@
 using Pkg; Pkg.activate(".")
-using NN_Condensate_Distributions
+using MLCondensateDistributions
 
 # Experiment Workflow: Baseline Lux Training
 # This script records the training hyperparameters for the AMIP baseline model.

@@ -6,8 +6,8 @@ using Zygote: Zygote
 using Serialization: serialize
 
 include("dataloader.jl")
-include("../src/NN_Condensate_Distributions.jl")
-using .NN_Condensate_Distributions
+include("../src/MLCondensateDistributions.jl")
+using .MLCondensateDistributions
 
 function train_model(data_dir::String; epochs=100, lr=1e-3, batch_size=512)
     # 1. Selection of features and targets

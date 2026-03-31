@@ -1,6 +1,6 @@
 using Test: Test
 
-Test.@testset "NN_Condensate_Distributions Full Test Suite" begin
+Test.@testset "MLCondensateDistributions Full Test Suite" begin
     include("test_cfSites.jl")
     include("test_googleles.jl")
     include("test_dataset_builder.jl")

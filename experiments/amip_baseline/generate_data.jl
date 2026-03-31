@@ -1,5 +1,5 @@
 using Pkg; Pkg.activate(".")
-using NN_Condensate_Distributions
+using MLCondensateDistributions
 
 # Experiment Workflow: Baseline AMIP Data Generation
 # Site 10, Month 1, AMIP experiment.

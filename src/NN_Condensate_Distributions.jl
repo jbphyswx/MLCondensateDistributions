@@ -1,4 +1,4 @@
-module NN_Condensate_Distributions
+module MLCondensateDistributions
 
 using Lux: Lux
 using Random: Random
