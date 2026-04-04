@@ -390,11 +390,10 @@ function load_4d_fields(les_dir::String, vars::Vector{String}; verbose=true)
     
     nt = length(timestamps)
     
-    # Pre-allocate 4D arrays
-    # Create dictionary mapping string name to the full 4D Float64 Array
-    data_arrays = Dict{String, Array{Float64, 4}}()
+    # Pre-allocate 4D arrays in Float32 so downstream timestep slices can stay as views.
+    data_arrays = Dict{String, Array{Float32, 4}}()
     for v in vars
-        data_arrays[v] = zeros(Float64, nx, ny, nz, nt)
+        data_arrays[v] = zeros(Float32, nx, ny, nz, nt)
     end
     
     # Loop over time and MPI ranks to fill the chunks
@@ -423,12 +422,15 @@ function load_4d_fields(les_dir::String, vars::Vector{String}; verbose=true)
                             error("Field $v size $(length(local_1d)) does not match expected $(n_i)x$(n_j)x$(n_k)")
                         end
                         local_3d = permutedims(reshape(local_1d, (n_k, n_j, n_i)), (3, 2, 1))
-                        data_arrays[v][
+                        dest = data_arrays[v][
                             i_lo : i_lo + n_i - 1, 
                             j_lo : j_lo + n_j - 1, 
                             k_lo : k_lo + n_k - 1, 
                             t_idx
-                        ] .= local_3d
+                        ]
+                        @inbounds for idx in eachindex(local_3d)
+                            dest[idx] = Float32(local_3d[idx])
+                        end
                     elseif verbose
                         @warn "Variable $(v) not found in $(file)."
                     end
@@ -439,17 +441,17 @@ function load_4d_fields(les_dir::String, vars::Vector{String}; verbose=true)
     
     # Extract pressure profiles from Stats
     stats_file = get_stats_path(les_dir)
-    p0_array = Float64[]
+    p0_array = Float32[]
     
     try
         NC.NCDataset(stats_file, "r") do ds
             # PyCLES often stores p0 in `profiles`
             if haskey(ds.group, "profiles") && haskey(ds.group["profiles"], "p0")
-                p0_array = collect(ds.group["profiles"]["p0"][:])
+                p0_array = Float32[Float32(x) for x in ds.group["profiles"]["p0"][:]]
             elseif haskey(ds.group, "reference") && haskey(ds.group["reference"], "p0")
-                p0_array = collect(ds.group["reference"]["p0"][:])
+                p0_array = Float32[Float32(x) for x in ds.group["reference"]["p0"][:]]
             elseif haskey(ds, "p0")
-                p0_array = collect(ds["p0"][:])
+                p0_array = Float32[Float32(x) for x in ds["p0"][:]]
             end
         end
     catch e

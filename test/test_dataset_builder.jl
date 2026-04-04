@@ -1,7 +1,6 @@
 using Test: Test
 using DataFrames: DataFrames
 
-include("../utils/GoogleLES.jl")
 include("../utils/coarse_graining.jl")
 include("../utils/dynamics.jl")
 include("../utils/dataset_builder.jl")
@@ -41,6 +40,8 @@ Test.@testset "Dataset Builder Orchestration Unit Test" begin
     
     spatial_info = Dict{Symbol, Any}(
         :dx_native => 50.0f0,
+        :domain_h => 6000.0f0,
+        :min_h_resolution => 100.0f0,
         :dz_native_profile => fill(25.0f0, 16) # 16 vertical levels to match dims
     )
     
@@ -50,15 +51,9 @@ Test.@testset "Dataset Builder Orchestration Unit Test" begin
     # Verification
     Test.@test df isa DataFrames.DataFrame
     
-    # The block 16x16x16 was coarse grained horizontally by 2x2.
-    # CG output dimensions should be 8x8x16. Total cells = 1024.
-    # We only injected condensate in a 4x4 area in the fine grid (which corresponds to 
-    # a 2x2 area in the coarse grid) down at index 5.
-    # A 2x2 patch = 4 cells. Those 4 cells have condensate. The other 1020 cells DO NOT.
-    # The sparsity mask drops cells where mean(q) < 1e-8.
-    # Hence, the resulting DataFrame should ONLY have EXACTLY 4 rows!
-    
-    Test.@test DataFrames.nrow(df) == 4
+    # Multi-level horizontal coarse graining now emits all levels at or above
+    # `:min_h_resolution`. This synthetic setup should produce trainable rows.
+    Test.@test DataFrames.nrow(df) > 0
     
     expected_schema = string.(collect(DatasetBuilder.SCHEMA_SYMBOL_ORDER))
     
@@ -73,6 +68,74 @@ Test.@testset "Dataset Builder Orchestration Unit Test" begin
     
     # Ensure they have mapping matching the test_id metadata bounds natively
     Test.@test df.month[1] == 999
+    Test.@test all(df.domain_h .== 6000.0f0)
+    Test.@test all(df.tke .>= -1f-6)
+    Test.@test all(abs.(df.q_con .- (df.q_liq .+ df.q_ice)) .<= 1f-10)
+    Test.@test all((0f0 .<= df.liq_fraction) .& (df.liq_fraction .<= 1f0))
+    Test.@test all((0f0 .<= df.ice_fraction) .& (df.ice_fraction .<= 1f0))
+    Test.@test all((0f0 .<= df.cloud_fraction) .& (df.cloud_fraction .<= 1f0))
+    Test.@test all(df.cloud_fraction .>= df.liq_fraction)
+    Test.@test all(df.cloud_fraction .>= df.ice_fraction)
+
+    # Multiscale invariants: we should emit multiple horizontal and vertical levels.
+    h_levels = sort(unique(df.resolution_h))
+    z_levels = sort(unique(df.resolution_z))
+    Test.@test length(h_levels) > 1
+    Test.@test length(z_levels) > 1
+    Test.@test minimum(h_levels) >= 100.0f0
+    Test.@test maximum(z_levels) <= 400.0f0
+
+    # Ensure (resolution_h, resolution_z) combinations are present.
+    hz_pairs = unique(zip(df.resolution_h, df.resolution_z))
+    Test.@test length(hz_pairs) > max(length(h_levels), length(z_levels))
     
     @info "Tabular Extraction and Sparsity Masks successfully validated!"
+end
+
+Test.@testset "GoogleLES metadata schema regression" begin
+    dims = (16, 16, 16)
+    fine_fields = Dict{String, AbstractArray{Float32, 3}}()
+
+    for k in ["ta", "hus", "wa", "ua", "va", "thetali", "pfull", "rhoa"]
+        fine_fields[k] = rand(Float32, dims...)
+    end
+
+    q_c = zeros(Float32, dims...)
+    q_c[1:4, 1:4, 5] .= 0.05f0
+    fine_fields["clw"] = q_c
+    fine_fields["cli"] = zeros(Float32, dims...)
+
+    metadata = Dict{Symbol, Any}(
+        :data_source => "GoogleLES",
+        :month => 1,
+        :site_id => 10,
+        :cfSite_number => 10,
+        :forcing_model => "GoogleLES",
+        :experiment => "amip",
+    )
+
+    spatial_info = Dict{Symbol, Any}(
+        :dx_native => 50.0f0,
+        :domain_h => 6000.0f0,
+        :min_h_resolution => 100.0f0,
+        :dz_native_profile => fill(25.0f0, 16)
+    )
+
+    df = DatasetBuilder.process_abstract_chunk(fine_fields, metadata, spatial_info)
+    Test.@test df isa DataFrames.DataFrame
+    Test.@test names(df) == string.(collect(DatasetBuilder.SCHEMA_SYMBOL_ORDER))
+    Test.@test all(df.data_source .== "GoogleLES")
+    Test.@test all(df.cfSite_number .== 10)
+    Test.@test all(df.domain_h .== 6000.0f0)
+    Test.@test all(df.tke .>= -1f-6)
+    Test.@test all(abs.(df.q_con .- (df.q_liq .+ df.q_ice)) .<= 1f-10)
+    Test.@test all((0f0 .<= df.liq_fraction) .& (df.liq_fraction .<= 1f0))
+    Test.@test all((0f0 .<= df.ice_fraction) .& (df.ice_fraction .<= 1f0))
+    Test.@test all((0f0 .<= df.cloud_fraction) .& (df.cloud_fraction .<= 1f0))
+
+    # Regression guard: vertical resolution ladder should be present.
+    z_levels = sort(unique(df.resolution_z))
+    Test.@test minimum(z_levels) == 25.0f0
+    Test.@test maximum(z_levels) == 400.0f0
+    Test.@test length(z_levels) >= 3
 end

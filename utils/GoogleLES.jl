@@ -20,6 +20,8 @@ module GoogleLES
         # ------------------------------------------------------------------- #
         # KEY VARIABLES METADATA (from Swirl-LM documentation)
         # ------------------------------------------------------------------- #
+        # 3D Variables (t, x, y, z) — Swirl-LM naming order; Julia Zarr `size`/`chunks` order
+        # differs from `_ARRAY_DIMENSIONS` list order. See docs/googleles_zarr_layout.md.
         # 3D Variables (t, x, y, z):
         #   T              : Air temperature (K)
         #   q_t            : Total water specific humidity (kg/kg)
@@ -119,9 +121,14 @@ function load_zarr_simulation(site_id::Int, month::Int, experiment::String="amip
     )
     @info "Loading Zarr metadata from: $path"
     
-    # zopen handles HTTP URLs transparently
+    # zopen handles HTTP URLs transparently.
+    # Prefer consolidated metadata for drastically fewer HTTP metadata reads.
     try
-        z = Zarr.zopen(path)
+        z = try
+            Zarr.zopen(path; consolidated=true)
+        catch
+            Zarr.zopen(path)
+        end
         return z
     catch e
         @error "Failed to open Zarr store at $path" exception=(e, catch_backtrace())

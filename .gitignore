@@ -40,6 +40,7 @@ Artifacts.toml
 *.in
 *.vtu
 *.nc
+*.zarr/
 *.mp4
 *.png
 *.hdf5
@@ -52,6 +53,10 @@ Artifacts.toml
 *.arrow
 *.parquet
 *.pt
+*.jls
+*.csv
+*.gif
+*.pdf
 
 # misc
 .DS_Store

@@ -1,10 +1,11 @@
-using Pkg; Pkg.activate(".")
+using Pkg
+Pkg.activate(".")
 include("../../utils/train_lux.jl")
 
 # Research Workflow: Train the baseline Lux model on the AMIP baseline data.
 # This script records the hyperparameters used for the initial model version.
 
-data_dir = "data/amip_baseline"
+data_dir = MLCondensateDistributions.Paths.processed_data_root()
 epochs = 100
 lr = 1e-3
 batch_size = 512

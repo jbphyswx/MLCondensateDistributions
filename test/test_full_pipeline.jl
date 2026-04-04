@@ -20,13 +20,13 @@ Test.@testset "End-to-End GCP Orchestrator Integration Pipeline" begin
         end
     end
     
-    # Run the orchestrator on a highly constrained 1-timestep environment wrapper
-    # Using `month=1`, `exp="amip"` matching the known Google benchmarks. `max_timesteps=1`.
-    @info "Dispatching `GL.build_tabular` over 1 time-step directly from remote server..."
+    # Run the orchestrator on the live remote source.
+    # `max_timesteps=1` keeps the test lightweight, but the output contract is case-level.
+    @info "Dispatching `GL.build_tabular` for a single timestep sample directly from remote server..."
     GL.build_tabular(10, 1, "amip", output_dir; max_timesteps=1)
     
     # Validation 1: Arrow serialization hit the disk securely
-    target_arrow = joinpath(output_dir, "googleles_amip_1_10_t1.arrow")
+    target_arrow = joinpath(output_dir, "googleles_case__10__month__1__exp__amip.arrow")
     Test.@test isfile(target_arrow)
     @info "Successfully found serialized payload at: $target_arrow"
     
