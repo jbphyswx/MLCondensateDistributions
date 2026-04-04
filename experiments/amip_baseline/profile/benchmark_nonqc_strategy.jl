@@ -2,6 +2,15 @@
 # A/B wall time: MLCD_GOOGLELES_NONQC_STRATEGY=auto (per-span) vs full_timestep.
 # Also sets MLCD_GOOGLELES_TIMESTEP_PROFILE=1 so you see running avg nonqc_zarr in the log.
 #
+# Not comparable to `benchmark_remote_zarr_slab_reads.jl`: that script times one field / few `copyto!` patterns;
+# this script times **entire** `build_tabular` (all fields, `nt` timesteps, tabular CPU, Arrow, etc.).
+#
+# The printed **SUMMARY** is `time()` around the whole `build_tabular` — not the profile’s `nonqc_zarr` average.
+# To compare non-QC Zarr seconds, read the timestep profile lines / final “profile summary” in the log (`nonqc_zarr=...`).
+#
+# Runs **two** orderings in one invocation (auto→full, then full→auto) so warm-cache bias is visible on both sides.
+# Compare `nonqc_zarr` in the logs; end-to-end wall still includes Arrow, tabular CPU, etc.
+#
 # Usage (from repo root):
 #   julia --project=. experiments/amip_baseline/profile/benchmark_nonqc_strategy.jl [site] [month] [nt] [experiment]
 #
@@ -21,8 +30,7 @@ function main()
     println("== benchmark_nonqc_strategy: site=$site month=$month nt=$nt experiment=$(repr(experiment)) ==")
     flush(stderr)
     flush(stdout)
-    results = Tuple{String,Float64,String}[]
-    for (label, nonqc) in (("NONQC_auto_per_span", "auto"), ("NONQC_full_timestep", "full_timestep"))
+    function _run(label::String, nonqc::String)
         wall, out = withenv(
             "MLCD_GOOGLELES_NONQC_STRATEGY" => nonqc,
             "MLCD_GOOGLELES_TIMESTEP_PROFILE" => "1",
@@ -33,9 +41,14 @@ function main()
             time() - t0, out
         end
         println("\n>>> RESULT $label  wall_seconds=$(round(wall; digits=2))  out=$out\n")
-        push!(results, (label, wall, out))
+        return (label, wall, out)
     end
-    println("=== A/B SUMMARY (end-to-end build_tabular wall time) ===")
+
+    results = Tuple{String,Float64,String}[]
+    for (label, nonqc) in (("NONQC_auto_per_span", "auto"), ("NONQC_full_timestep", "full_timestep"))
+        push!(results, _run(label, nonqc))
+    end
+    println("=== A/B SUMMARY order=auto_then_full (end-to-end wall time) ===")
     for (label, wall, _) in results
         println("  $label  $(round(wall; digits=3)) s")
     end
@@ -44,7 +57,20 @@ function main()
         println("  ratio full_timestep/auto = $(round(w2 / w1; digits=3))  (values >1 mean full_timestep slower)")
         println("  ratio auto/full_timestep = $(round(w1 / w2; digits=3))  (values >1 mean per-span slower)")
     end
-    println("Note: second run may be faster from warm HTTP/Zarr cache; swap loop order or repeat for a fair read.")
+
+    println("\n--- Second pass: full_timestep first, then auto (isolates warm-cache bias on one ordering) ---")
+    results2 = Tuple{String,Float64,String}[]
+    for (label, nonqc) in (("NONQC_full_timestep_first", "full_timestep"), ("NONQC_auto_second", "auto"))
+        push!(results2, _run(label, nonqc))
+    end
+    println("=== A/B SUMMARY order=full_then_auto ===")
+    for (label, wall, _) in results2
+        println("  $label  $(round(wall; digits=3)) s")
+    end
+    if length(results2) == 2
+        wf, wa = results2[1][2], results2[2][2]
+        println("  ratio auto/full (this pass) = $(round(wa / wf; digits=3))")
+    end
 end
 
 main()

@@ -66,7 +66,11 @@ const GOOGLELES_FIELD_SPECS = (
     ("u", "ua"),
     ("v", "va"),
     ("w", "wa"),
-    ("p", "pfull"),
+    # Use the reference pressure as the canonical GoogleLES pressure feature.
+    # Swirl-LM defines total pressure as p_ref + p, but the thermodynamic path
+    # we mirror here already operates on p_ref, so we intentionally do not
+    # reconstruct a derived total-pressure feature at export time.
+    ("p_ref", "pfull"),
     ("rho", "rhoa"),
     ("theta_li", "thetali"),
 )
@@ -90,6 +94,15 @@ const GOOGLELES_DEFAULT_BATCH_SIZE = 8
 function _parse_bool_env(name::String, default::Bool)
     raw = get(ENV, name, default ? "1" : "0")
     return lowercase(strip(raw)) in ("1", "true", "yes", "y", "on")
+end
+
+"""Read `MLCD_COARSENING_MODE` (`binary` default, or `convolutional` / `conv` for 3D block coarsening)."""
+function _parse_coarsening_mode()
+    raw = lowercase(strip(get(ENV, "MLCD_COARSENING_MODE", "binary")))
+    if raw == "convolutional" || raw == "conv"
+        return :convolutional
+    end
+    return :binary
 end
 
 function case_arrow_filename(site_id::Int, month::Int, experiment::String)
@@ -682,6 +695,35 @@ function _group_mask_spans_by_overlapping_z_chunks(
     return groups
 end
 
+"""
+    _googleles_nonqc_span_groups(spans, nz, z_cz, merge_z_chunks, single_fused_load)
+
+Build `span_groups` for per-span non-`q_c` Zarr loads in `build_tabular`.
+
+When `single_fused_load` is `true` (default via env `MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD`),
+returns `[spans]` so the timestep does **one** `_load_googleles_timestep_fields_into_span_list!`
+with all mask runs fused — same z-indices as chunk-partitioning, but **no** extra passes over
+`field_specs` for disjoint z-chunk groups.
+
+When `false`, restores the previous split: chunk-overlap groups if `merge_z_chunks`, else one
+group per contiguous span.
+"""
+function _googleles_nonqc_span_groups(
+    spans::Vector{UnitRange{Int}},
+    nz::Int,
+    z_cz::Int,
+    merge_z_chunks::Bool,
+    single_fused_load::Bool,
+)::Vector{Vector{UnitRange{Int}}}
+    if single_fused_load && !isempty(spans)
+        return [spans]
+    elseif merge_z_chunks
+        return _group_mask_spans_by_overlapping_z_chunks(spans, nz, z_cz)
+    else
+        return [[r] for r in spans]
+    end
+end
+
 function _has_cloud_after_2x2(q_c::AbstractArray{<:Real, 3}; threshold::Float32=1f-10)
     nx, ny, nz = size(q_c)
     nxc = div(nx, 2)
@@ -749,7 +791,7 @@ const GOOGLELES_BATCH_SPECS = (
     ("u", "ua"),
     ("v", "va"),
     ("w", "wa"),
-    ("p", "pfull"),
+    ("p_ref", "pfull"),
     ("rho", "rhoa"),
     ("theta_li", "thetali"),
 )

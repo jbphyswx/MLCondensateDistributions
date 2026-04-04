@@ -81,6 +81,24 @@ Test.@testset "ArrayUtils 3D pooling and full-domain" begin
     Test.@test fd[2] ≈ Statistics.mean(@view a[:, :, 2])
 end
 
+Test.@testset "ArrayUtils coarsen_dz_profile_factor" begin
+    dz = Float32[1, 2, 3, 4, 5, 6]
+    Test.@test coarsen_dz_profile_factor(dz, 2) ≈ Float32[3, 7, 11]
+    Test.@test coarsen_dz_profile_factor(dz, 3) ≈ Float32[6, 15]
+    Test.@test coarsen_dz_profile_2x(dz) == coarsen_dz_profile_factor(dz, 2)
+    dz_odd = Float32[1, 1, 1]
+    Test.@test coarsen_dz_profile_2x(dz_odd) ≈ Float32[2]
+end
+
+Test.@testset "ArrayUtils conv3d_block_mean vs horizontal+vertical" begin
+    data = reshape(Float32.(1:(4 * 4 * 4)), 4, 4, 4)
+    j = conv3d_block_mean(data, 2, 2, 2)
+    h = coarsen3d_horizontal_mean(data, 2, 2)
+    v = coarsen3d_vertical_mean(h, 2)
+    Test.@test size(j) == (2, 2, 2)
+    Test.@test j ≈ v
+end
+
 Test.@testset "ArrayUtils 3D pooling in-place zero allocations" begin
     # Warmup
     a = reshape(Float32.(1:32), 4, 4, 2)

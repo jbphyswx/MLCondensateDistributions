@@ -99,11 +99,12 @@ Efficient single-pass pipeline for remote data processing:
 4. **Logical spans**: Decompose `z_keep_mask` into contiguous true runs (`_collect_true_spans`).
    The mask uses the full native vertical coarsening schedule (`z_future_factors`), so it is
    the conservative native-z set for `process_abstract_chunk`.
-5. **Non-`q_c` Zarr reads (chunk-merge default)**: Spans whose storage z-chunks overlap are
-   grouped; **`_load_googleles_timestep_fields_into_span_list!`** runs **one narrow Zarr slice
-   per original span** (e.g. `10:20` then `40:50`) — **never** a widened hull passed to Zarr.
-   Grouping is batching/orchestration only. Disable with `MLCD_GOOGLELES_Z_CHUNK_MERGE=0`
-   (same narrow slices, one group per span).
+5. **Non-`q_c` Zarr reads**: By default **`MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD=1`** (default on),
+   all mask spans for the timestep are passed as **one** group so **`_load_googleles_timestep_fields_into_span_list!`**
+   runs **once** per cloudy timestep (fused z-indices), avoiding repeated full passes over every
+   non-`q_c` field when clouds sit in disjoint z-chunks. Set **`MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD=0`**
+   to restore chunk-overlap partitioning (`MLCD_GOOGLELES_Z_CHUNK_MERGE`) or per-span groups when merge is off.
+   Reads stay **narrow** (no hull widening to full column unless `MLCD_GOOGLELES_NONQC_STRATEGY=full_timestep`).
 6. **Local computation**: Coarse-graining uses `@view` into local buffers only (no lazy Zarr).
 
 Each cloudy timestep: `q_c` is materialized once; non-`q_c` fields use chunk-overlap grouping by default (batched narrow slices per group, never a hull widened at the API).
@@ -148,11 +149,12 @@ Returns nothing; output is file-based.
 
 # Performance Notes
 
-- Non-`q_c` loads: **chunk-overlap groups** by default (`MLCD_GOOGLELES_Z_CHUNK_MERGE`): batched **narrow** `z_range` per logical span (no hull widening to Zarr); `merge=0` flattens to one span per group. Opt-in full-column: `MLCD_GOOGLELES_NONQC_STRATEGY=full_timestep`.
+- Non-`q_c` loads: **`MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD`** (default `1`) → one fused non-`q_c` read per cloudy timestep over all mask spans; set `0` to use chunk-merge (`MLCD_GOOGLELES_Z_CHUNK_MERGE`) or per-span groups. Opt-in full native column: `MLCD_GOOGLELES_NONQC_STRATEGY=full_timestep`.
 - Native `z_keep_mask` uses the same future vertical factors as the builder, so requested z-indices match reduction needs; levels that stay `false` are never fetched for non-`q_c` variables.
 - `copyto!` after each span read keeps compute off lazy Zarr; a reused `scratch` dict avoids per-span `Dict` allocation.
 - Preallocated 3D buffers are reused across timesteps and spans.
 - `MLCD_SKIP_FINITE_ASSERT_PER_CHUNK=1`: skip `_assert_finite_dataframe` on each span/timestep chunk (final case-level check still runs).
+- **`MLCD_COARSENING_MODE=convolutional`** (or `conv`): emit rows at every valid 3D block `(fx,fy,fz)` from native (see `CoarseningPipeline.build_convolutional_coarsening_triples`); default `binary` keeps the seed ladder + binary vertical ladder.
 - **`MLCD_GOOGLELES_TIMESTEP_PROFILE=1`**: for each **cloudy** timestep (after cloud + z-keep checks), record seconds for: **`qc`** (`q_c` slab copy from cache), **`prep`** (masks + span grouping), **`nonqc_zarr`** (`_materialize_*` / `_load_googleles_timestep_fields_into_span_list!`), **`tabular`** (`_googleles_tabular_one_span!` including `process_abstract_chunk`). Prints a running **average over cloudy timesteps** on the same cadence as progress (every 8 processed steps) and a **summary** after timestep processing; **`Arrow.write`** time once at the end.
 - **`MLCD_GOOGLELES_TIMESTEP_PROFILE_EACH=1`**: with profile enabled, also `println` one line **per cloudy timestep** (verbose).
 
@@ -217,6 +219,7 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
         min_h_resolution = Float32(min_h_resolution),
         dz_native_profile = Float32.(dz_native_profile),
         seeds_h = (1,),
+        coarsening_mode = _parse_coarsening_mode(),
     )
     z_schemes_native = CoarseGraining.compute_z_coarsening_scheme(spatial_info.dz_native_profile, 400f0)
     z_future_factors = Int[z_schemes_native[i][1] for i in 2:length(z_schemes_native)]
@@ -229,8 +232,9 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
 
     z_storage_cz = _googleles_effective_z_chunk_size(ds, "q_c")
     merge_z_chunks = _parse_bool_env("MLCD_GOOGLELES_Z_CHUNK_MERGE", true)
+    nonqc_single_fused_load = _parse_bool_env("MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD", true)
     if verbose
-        @info "GoogleLES Zarr storage z-chunk=$z_storage_cz merge_overlapping_chunks=$merge_z_chunks"
+        @info "GoogleLES Zarr storage z-chunk=$z_storage_cz merge_overlapping_chunks=$merge_z_chunks nonqc_single_fused_load=$nonqc_single_fused_load"
     end
 
     case_df_acc = Ref{Union{Nothing, DataFrames.DataFrame}}(nothing)
@@ -298,10 +302,8 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
             spans = _collect_true_spans(z_keep_mask)
             span_groups = if load_full_nonqc
                 nothing
-            elseif merge_z_chunks
-                _group_mask_spans_by_overlapping_z_chunks(spans, nz_z, z_storage_cz)
             else
-                Vector{UnitRange{Int}}[[r] for r in spans]
+                _googleles_nonqc_span_groups(spans, nz_z, z_storage_cz, merge_z_chunks, nonqc_single_fused_load)
             end
             t_prep = time() - t_prep0
 
@@ -443,10 +445,8 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                 t_load = batch_start + local_t
                 span_groups = if load_full_nonqc
                     nothing
-                elseif merge_z_chunks
-                    _group_mask_spans_by_overlapping_z_chunks(spans, nz_z, z_storage_cz)
                 else
-                    Vector{UnitRange{Int}}[[r] for r in spans]
+                    _googleles_nonqc_span_groups(spans, nz_z, z_storage_cz, merge_z_chunks, nonqc_single_fused_load)
                 end
                 t_prep = time() - t_prep0
 
@@ -625,6 +625,7 @@ function cfSites.build_tabular(cfSite_number::Int, month::Int, forcing_model::St
         min_h_resolution = Float32(min_h_resolution),
         dz_native_profile = Float32.(dz_native_profile),
         seeds_h = (1,),
+        coarsening_mode = _parse_coarsening_mode(),
     )
 
     final_df = nothing

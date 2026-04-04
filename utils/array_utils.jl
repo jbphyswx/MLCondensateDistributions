@@ -11,9 +11,12 @@ export seed_factor_ladder,
     coarsen3d_horizontal_mean!,
     coarsen3d_vertical_mean,
     coarsen3d_vertical_mean!,
+    conv3d_block_mean,
+    conv3d_block_mean!,
     coarsen_fields_horizontal,
     coarsen_fields_vertical,
     coarsen_dz_profile_2x,
+    coarsen_dz_profile_factor,
     full_domain_mean_3d
 
 const ScheduleRow{T} = NamedTuple{(:factor, :resolution_h, :nx_out), Tuple{Int, T, Int}}
@@ -321,6 +324,68 @@ function coarsen3d_vertical_mean(data::AbstractArray{T, 3}, fz::Int) where {T <:
 end
 
 """
+    conv3d_block_mean!(out, data, fx, fy, fz)
+    conv3d_block_mean(data, fx, fy, fz)
+
+Non-overlapping **3D** box average: each output voxel is the mean of one `fx×fy×fz` block.
+Same numerics as mean pooling with kernel `(fx,fy,fz)` and stride `(fx,fy,fz)`, or a normalized
+3D box convolution on valid positions.
+
+For **means**, this matches applying `coarsen3d_horizontal_mean` then `coarsen3d_vertical_mean`
+with the same factors (when `nx,ny,nz` divide evenly).
+
+`data` is `(nx, ny, nz)`; `out` must be `(div(nx,fx), div(ny,fy), div(nz,fz))`. Partial blocks
+at the end are dropped (crop-by-division), consistent with `coarsen2d_mean!`.
+"""
+function conv3d_block_mean!(
+    out::AbstractArray{T, 3},
+    data::AbstractArray{T, 3},
+    fx::Int,
+    fy::Int,
+    fz::Int,
+) where {T <: Real}
+    fx >= 1 || throw(ArgumentError("fx must be >= 1"))
+    fy >= 1 || throw(ArgumentError("fy must be >= 1"))
+    fz >= 1 || throw(ArgumentError("fz must be >= 1"))
+
+    nx, ny, nz = size(data)
+    nxo = div(nx, fx)
+    nyo = div(ny, fy)
+    nzo = div(nz, fz)
+    size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch for conv3d_block_mean"))
+
+    inv_vol = one(T) / T(fx * fy * fz)
+    @inbounds for k in 1:nzo
+        base_k = (k - 1) * fz + 1
+        for j in 1:nyo
+            base_j = (j - 1) * fy + 1
+            for i in 1:nxo
+                base_i = (i - 1) * fx + 1
+                acc = zero(T)
+                for kk in 0:(fz - 1)
+                    z = base_k + kk
+                    for jj in 0:(fy - 1)
+                        y = base_j + jj
+                        for ii in 0:(fx - 1)
+                            x = base_i + ii
+                            acc += data[x, y, z]
+                        end
+                    end
+                end
+                out[i, j, k] = acc * inv_vol
+            end
+        end
+    end
+    return out
+end
+
+function conv3d_block_mean(data::AbstractArray{T, 3}, fx::Int, fy::Int, fz::Int) where {T <: Real}
+    nx, ny, nz = size(data)
+    out = similar(data, div(nx, fx), div(ny, fy), div(nz, fz))
+    return conv3d_block_mean!(out, data, fx, fy, fz)
+end
+
+"""
     coarsen_fields_horizontal(fields, fx, fy)
 
 Coarsen all 3D fields in `fields` with a shared `(fx, fy)`.
@@ -365,9 +430,34 @@ function coarsen_fields_vertical(fields::AbstractDict{K, A}, fz::Int) where {K, 
 end
 
 """
+    coarsen_dz_profile_factor(dz_profile, fz)
+
+Coarsen a per-level thickness profile by summing each contiguous group of `fz` native layers.
+Output length is `length(dz_profile) ÷ fz`.
+"""
+function coarsen_dz_profile_factor(dz_profile::AbstractVector{<:Real}, fz::Int)
+    fz >= 1 || throw(ArgumentError("fz must be >= 1"))
+    nz = length(dz_profile)
+    rem(nz, fz) != 0 && throw(DimensionMismatch("dz_profile length $nz must be divisible by fz=$fz"))
+    nzo = div(nz, fz)
+    out = Vector{Float32}(undef, nzo)
+    @inbounds for k in 1:nzo
+        base = (k - 1) * fz + 1
+        acc = Float32(0)
+        for kk in 0:(fz - 1)
+            acc += Float32(dz_profile[base + kk])
+        end
+        out[k] = acc
+    end
+    return out
+end
+
+"""
     coarsen_dz_profile_2x(dz_profile)
 
 Coarsen vertical cell thickness profile by summing adjacent pairs.
+If `length(dz_profile)` is odd, the top (last) entry is dropped — matching the legacy
+binary vertical ladder (same as pairing the first `2 * (length ÷ 2)` levels).
 """
 function coarsen_dz_profile_2x(dz_profile::AbstractVector{<:Real})
     nz = length(dz_profile)

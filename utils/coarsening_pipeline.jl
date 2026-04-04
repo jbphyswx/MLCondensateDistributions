@@ -1,15 +1,21 @@
 module CoarseningPipeline
 
+using Statistics: Statistics
+
 include("array_utils.jl")
 using .ArrayUtils
 
 export build_horizontal_levels,
+    build_convolutional_coarsening_triples,
     coarsen_fields_at_level,
+    coarsen_fields_3d_block,
     coarsen_fields_vertical_at_level,
     coarsen_products_vertical_at_level,
     coarsen_dz_profile_2x_at_level,
+    coarsen_dz_profile_factor,
     coarsen3d_vertical_mean,
     coarsen_products_at_level,
+    coarsen_products_3d_block,
     covariance_from_moments,
     build_horizontal_multilevel_views
 
@@ -56,6 +62,133 @@ function build_horizontal_levels(
     end
 
     return levels
+end
+
+"""
+    build_convolutional_coarsening_triples(
+        nx, ny, nz, dh, min_h, dz_ref, max_z;
+        square_horizontal=true,
+    ) -> Vector{NTuple{3,Int}}
+
+All valid `(fx, fy, fz)` such that the native grid divides evenly, horizontal blocks respect
+`min_h` (via `dh * fx` when `fx > 1`), and nominal vertical thickness `fz * dz_ref <= max_z`.
+
+Unlike [`build_horizontal_levels`](@ref) combined with binary vertical ladders, this enumerates
+**independent** 3D block factors (e.g. `3×3×2`), giving more resolution steps in physical space.
+Each triple is meant to be applied directly from **native** fields (no reuse across triples).
+"""
+function build_convolutional_coarsening_triples(
+    nx::Int,
+    ny::Int,
+    nz::Int,
+    dh::FT,
+    min_h::FT,
+    dz_ref::FT,
+    max_z::FT;
+    square_horizontal::Bool = true,
+)::Vector{NTuple{3,Int}} where {FT <: Real}
+    triples = NTuple{3,Int}[]
+    if square_horizontal
+        for fx in 1:nx
+            mod(nx, fx) != 0 && continue
+            mod(ny, fx) != 0 && continue
+            if fx > 1 && dh * fx < min_h
+                continue
+            end
+            for fz in 1:nz
+                mod(nz, fz) != 0 && continue
+                if fz * dz_ref > max_z
+                    continue
+                end
+                push!(triples, (fx, fx, fz))
+            end
+        end
+    else
+        for fx in 1:nx, fy in 1:ny
+            mod(nx, fx) != 0 && continue
+            mod(ny, fy) != 0 && continue
+            if max(fx, fy) > 1 && dh * max(fx, fy) < min_h
+                continue
+            end
+            for fz in 1:nz
+                mod(nz, fz) != 0 && continue
+                if fz * dz_ref > max_z
+                    continue
+                end
+                push!(triples, (fx, fy, fz))
+            end
+        end
+    end
+    unique!(triples)
+    sort!(triples; by = t -> (t[3], t[1], t[2]))
+    return triples
+end
+
+"""
+    coarsen_fields_3d_block(fields, fx, fy, fz)
+
+Coarsen every 3D field in the `NamedTuple` with [`ArrayUtils.conv3d_block_mean`](@ref).
+"""
+function coarsen_fields_3d_block(
+    fields::NamedTuple{FN, FV},
+    fx::Int,
+    fy::Int,
+    fz::Int,
+) where {FN, FV <: Tuple}
+    vals = map(arr -> Array(conv3d_block_mean(arr, fx, fy, fz)), values(fields))
+    return NamedTuple{FN}(vals)
+end
+
+"""
+    coarsen_products_3d_block(fields, product_pairs, fx, fy, fz)
+
+Block-average of `x .* y` over each `fx×fy×fz` cell (same numerics as coarsening `<xy>` under 3D means).
+"""
+function coarsen_products_3d_block(
+    fields::NamedTuple{FN, FV},
+    product_pairs::NamedTuple{PN, PV},
+    fx::Int,
+    fy::Int,
+    fz::Int,
+) where {FN, FV <: Tuple, PN, PV <: Tuple}
+    vals = map(PN) do out_name
+        x_name, y_name = getproperty(product_pairs, out_name)
+        x = _container_get_field(fields, _field_name_key(x_name))
+        y = _container_get_field(fields, _field_name_key(y_name))
+        size(x) == size(y) || throw(DimensionMismatch("Fields for product $(out_name) have mismatched sizes"))
+
+        nx, ny, nz = size(x)
+        nxo = div(nx, fx)
+        nyo = div(ny, fy)
+        nzo = div(nz, fz)
+        T = eltype(x)
+        inv_vol = one(T) / T(fx * fy * fz)
+        prod_coarse = similar(x, nxo, nyo, nzo)
+
+        @inbounds for k in 1:nzo
+            base_k = (k - 1) * fz + 1
+            for j in 1:nyo
+                base_j = (j - 1) * fy + 1
+                for i in 1:nxo
+                    base_i = (i - 1) * fx + 1
+                    acc = zero(T)
+                    for kk in 0:(fz - 1)
+                        z = base_k + kk
+                        for jj in 0:(fy - 1)
+                            yidx = base_j + jj
+                            for ii in 0:(fx - 1)
+                                xi = base_i + ii
+                                acc += x[xi, yidx, z] * y[xi, yidx, z]
+                            end
+                        end
+                    end
+                    prod_coarse[i, j, k] = acc * inv_vol
+                end
+            end
+        end
+        prod_coarse
+    end
+    return NamedTuple{PN}(vals)
 end
 
 """

@@ -64,7 +64,7 @@ const GOOGLELES_FIELD_SPECS = (
     ("u", "ua"),
     ("v", "va"),
     ("w", "wa"),
-    ("p", "pfull"),
+    ("p_ref", "pfull"),
     ("rho", "rhoa"),
     ("theta_li", "thetali"),
 )
@@ -440,7 +440,7 @@ const GOOGLELES_BATCH_SPECS = (
     ("u", "ua"),
     ("v", "va"),
     ("w", "wa"),
-    ("p", "pfull"),
+    ("p_ref", "pfull"),
     ("rho", "rhoa"),
     ("theta_li", "thetali"),
 )

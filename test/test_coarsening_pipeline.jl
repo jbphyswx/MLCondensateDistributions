@@ -2,6 +2,8 @@ using Test: Test
 using Random: Random
 using Statistics: Statistics
 
+include("../utils/array_utils.jl")
+using .ArrayUtils: conv3d_block_mean
 include("../utils/coarsening_pipeline.jl")
 using .CoarseningPipeline
 
@@ -52,6 +54,22 @@ Test.@testset "CoarseningPipeline type stability" begin
     products = Dict("ab" => ("a", "b"))
     prod = Test.@inferred coarsen_products_at_level(fields, products, 2, 2)
     Test.@test size(prod["ab"]) == (4, 4, 4)
+end
+
+Test.@testset "CoarseningPipeline convolutional triples and 3D products" begin
+    triples = build_convolutional_coarsening_triples(6, 6, 6, Float32(1), Float32(0), Float32(10), Float32(100))
+    Test.@test (2, 2, 2) in triples
+    Test.@test (3, 3, 3) in triples
+    Test.@test (1, 1, 1) in triples
+
+    a = reshape(Float32.(1:(4 * 4 * 4)), 4, 4, 4)
+    b = fill(Float32(2), 4, 4, 4)
+    fields = (hus = a, thetali = b)
+    pairs = (qt_h = (:hus, :thetali),)
+    p3 = coarsen_products_3d_block(fields, pairs, 2, 2, 2)
+    m1 = conv3d_block_mean(a, 2, 2, 2)
+    m2 = conv3d_block_mean(b, 2, 2, 2)
+    Test.@test p3.qt_h ≈ m1 .* m2
 end
 
 Test.@testset "CoarseningPipeline allocation regression" begin

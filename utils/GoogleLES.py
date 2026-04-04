@@ -13,7 +13,12 @@
     #   q_r            : Rain droplet mass fraction (kg/kg)
     #   q_s            : Snow mass fraction (kg/kg)
     #   u, v, w        : Zonal, Meridional, and Vertical velocities (m/s)
-    #   p, p_ref       : Hydrodynamic & Reference pressures (Pa)
+    #   p, p_ref       : Hydrodynamic & Reference pressures (Pa). Total pressure is `p_ref` + `p` (see Swirl-LM docs for details) 
+                            Swirl-LM defines total pressure as `p_ref` + `p`.
+        #                    For the MLCD GoogleLES export path we intentionally use `p_ref`
+        #                    as the pressure feature, because that is the quantity used in the
+        #                    thermodynamic calculations we mirror here and it avoids carrying an
+        #                    extra derived pressure feature for now.
     #   rho            : Air density (kg/m^3)
     #   theta_li       : Liquid-ice potential temperature (K)
     #   rad_flux_lw/sw : Net longwave/shortwave radiative fluxes (W/m^2)
