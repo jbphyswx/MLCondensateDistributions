@@ -84,7 +84,7 @@ function prompt_continue(batch_index::Int, total_batches::Int)
     return isempty(answer) || answer in ("y", "yes")
 end
 
-function run_case!(site_id::Int, month::Int; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool)
+function run_case!(site_id::Int, month::Int; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool, tabular_options::MLCD.TabularBuildOptions)
     started_at = time()
     println("Case start: site=$(site_id), month=$(month), experiment=$(experiment), max_timesteps=$(max_timesteps), timestep_batch_size=$(timestep_batch_size)")
 
@@ -98,6 +98,7 @@ function run_case!(site_id::Int, month::Int; experiment::String, output_dir::Str
         min_h_resolution=min_h_resolution,
         include_cfsites=include_cfsites,
         verbose=verbose,
+        tabular_options=tabular_options,
     )
 
     rows = case_rows(site_id, month, experiment, output_dir)
@@ -108,37 +109,37 @@ function run_case!(site_id::Int, month::Int; experiment::String, output_dir::Str
     return (site_id=site_id, month=month, rows=rows, status=status, timestamp=string(Dates.now()))
 end
 
-function run_case_batch(cases::AbstractVector{<:NamedTuple}; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool, threaded::Bool)
+function run_case_batch(cases::AbstractVector{<:NamedTuple}; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool, threaded::Bool, tabular_options::MLCD.TabularBuildOptions)
     if threaded
-        tasks = [Base.Threads.@spawn run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose) for case in cases]
+        tasks = [Base.Threads.@spawn run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, tabular_options=tabular_options) for case in cases]
         return fetch.(tasks)
     end
 
     results = NamedTuple[]
     for case in cases
-        push!(results, run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose))
+        push!(results, run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, tabular_options=tabular_options))
     end
     return results
 end
 
-function run_case_batch_omt(cases::AbstractVector{<:NamedTuple}; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool)
+function run_case_batch_omt(cases::AbstractVector{<:NamedTuple}; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool, tabular_options::MLCD.TabularBuildOptions)
     # Keep OMT optional at runtime so the experiment can stay lean.
     pkg_path = Base.find_package("OhMyThreads")
     if pkg_path === nothing
         @warn "PARALLEL_BACKEND=omt requested, but OhMyThreads is not available in this environment; falling back to Base threads."
-        return run_case_batch(cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, threaded=true)
+        return run_case_batch(cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, threaded=true, tabular_options=tabular_options)
     end
 
     OMT = Base.require(Base.PkgId(Base.UUID("67456a42-1dca-4109-a031-0a68de7e3ad5"), "OhMyThreads"))
     return OMT.tmap(cases) do case
-        run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose)
+        run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, tabular_options=tabular_options)
     end
 end
 
-function run_case_batch_distributed(cases::AbstractVector{<:NamedTuple}; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool)
+function run_case_batch_distributed(cases::AbstractVector{<:NamedTuple}; experiment::String, output_dir::String, max_timesteps::Int, timestep_batch_size::Int, min_h_resolution::Float32, include_cfsites::Bool, verbose::Bool, tabular_options::MLCD.TabularBuildOptions)
     if Distributed.nworkers() == 1
         @warn "Distributed backend requested but no workers are available; falling back to Base threads."
-        return run_case_batch(cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, threaded=true)
+        return run_case_batch(cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, threaded=true, tabular_options=tabular_options)
     end
 
     for w in Distributed.workers()
@@ -152,7 +153,7 @@ function run_case_batch_distributed(cases::AbstractVector{<:NamedTuple}; experim
 
     return Distributed.pmap(cases) do case
         Main.Random.seed!(1234 + case.site_id + 1000 * case.month)
-        Main.run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose)
+        Main.run_case!(case.site_id, case.month; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, tabular_options=tabular_options)
     end
 end
 
@@ -170,6 +171,7 @@ function batch_generate_data!(;
     parallel_backend::Symbol = Symbol(lowercase(get(ENV, "PARALLEL_BACKEND", MLCD.EnvHelpers.parse_bool_env("THREADED", true) ? "threads" : "serial"))),
     pause_between_batches::Bool = MLCD.EnvHelpers.parse_bool_env("PAUSE_BETWEEN_BATCHES", DEFAULT_PAUSE_BETWEEN_BATCHES),
     force_reprocess::Bool = MLCD.EnvHelpers.parse_bool_env("FORCE_REPROCESS", DEFAULT_FORCE_REPROCESS),
+    tabular_options::MLCD.TabularBuildOptions = MLCD.tabular_build_options_from_env(),
 )
     mkpath(output_dir)
     mkpath(MLCD.Paths.workflow_cache_root())
@@ -203,11 +205,11 @@ function batch_generate_data!(;
         println("Starting batch $(batch_index)/$(total_batches) with $(length(batch_cases)) case(s)...")
 
         results = if parallel_backend == :distributed
-            run_case_batch_distributed(batch_cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose)
+            run_case_batch_distributed(batch_cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, tabular_options=tabular_options)
         elseif parallel_backend == :omt
-            run_case_batch_omt(batch_cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose)
+            run_case_batch_omt(batch_cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, tabular_options=tabular_options)
         else
-            run_case_batch(batch_cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, threaded=(parallel_backend == :threads))
+            run_case_batch(batch_cases; experiment=experiment, output_dir=output_dir, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, include_cfsites=include_cfsites, verbose=verbose, threaded=(parallel_backend == :threads), tabular_options=tabular_options)
         end
 
         batch_rows = 0
@@ -245,7 +247,7 @@ function run_preferred_batch_generate!(;
     max_timesteps::Int = parse(Int, get(ENV, "MAX_TIMESTEPS", "0")),
     force_reprocess::Bool = MLCD.EnvHelpers.parse_bool_env("FORCE_REPROCESS", DEFAULT_FORCE_REPROCESS),
 )
-    ENV["MLCD_GOOGLELES_FORCE_FULLCASE"] = "true" # we gotta stop relying on env flags
+    tabular_opts = MLCD.tabular_build_options_from_env(force_fullcase=true)
 
     # use threaded if threads are available, otherwise fall back to serial; this is just for convenience in interactive use, not a hard requirement
     if Threads.nthreads() > 1
@@ -264,6 +266,7 @@ function run_preferred_batch_generate!(;
         pause_between_batches=false,
         force_reprocess=force_reprocess,
         verbose=PREFERRED_VERBOSE,
+        tabular_options=tabular_opts,
     )
 end
 

@@ -41,13 +41,24 @@ function generate_data!(;
     include_googleles::Bool = true,
     include_cfsites::Bool = false,
     verbose::Bool = DEFAULT_VERBOSE_LOGS,
+    tabular_options::MLCD.TabularBuildOptions = MLCD.TabularBuildOptions(),
 )
     mkpath(output_dir)
 
     println("Generating AMIP baseline data in $(output_dir)")
 
     if include_googleles
-        MLCD.GoogleLES.build_tabular(site_id, month, experiment, output_dir; max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, verbose=verbose)
+        MLCD.GoogleLES.build_tabular(
+            site_id,
+            month,
+            experiment,
+            output_dir;
+            max_timesteps=max_timesteps,
+            timestep_batch_size=timestep_batch_size,
+            min_h_resolution=min_h_resolution,
+            verbose=verbose,
+            tabular_options=tabular_options,
+        )
     end
 
     if include_cfsites
@@ -59,7 +70,17 @@ function generate_data!(;
             end
         else
             try
-                MLCD.cfSites.build_tabular(site_id, month, forcing_model, experiment, output_dir; max_timesteps=max_timesteps, min_h_resolution=min_h_resolution, verbose=verbose)
+                MLCD.cfSites.build_tabular(
+                    site_id,
+                    month,
+                    forcing_model,
+                    experiment,
+                    output_dir;
+                    max_timesteps=max_timesteps,
+                    min_h_resolution=min_h_resolution,
+                    verbose=verbose,
+                    tabular_options=tabular_options,
+                )
             catch err
                 if verbose
                     @warn "cfSites data generation skipped after read failure: $(sprint(showerror, err))"
@@ -78,5 +99,13 @@ if abspath(PROGRAM_FILE) == @__FILE__
     timestep_batch_size = parse(Int, get(ENV, "TIMESTEP_BATCH_SIZE", string(DEFAULT_TIMESTEP_BATCH_SIZE)))
     min_h_resolution = parse(Float32, get(ENV, "MIN_H_RESOLUTION", string(DEFAULT_MIN_H_RESOLUTION)))
     verbose = MLCD.EnvHelpers.parse_bool_env("VERBOSE_GENERATION", DEFAULT_VERBOSE_LOGS)
-    generate_data!(; include_cfsites=include_cfsites, max_timesteps=max_timesteps, timestep_batch_size=timestep_batch_size, min_h_resolution=min_h_resolution, verbose=verbose)
+    tabular_opts = MLCD.tabular_build_options_from_env()
+    generate_data!(;
+        include_cfsites=include_cfsites,
+        max_timesteps=max_timesteps,
+        timestep_batch_size=timestep_batch_size,
+        min_h_resolution=min_h_resolution,
+        verbose=verbose,
+        tabular_options=tabular_opts,
+    )
 end

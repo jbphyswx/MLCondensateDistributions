@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
-# A/B wall time: MLCD_GOOGLELES_NONQC_STRATEGY=auto (per-span) vs full_timestep.
-# Also sets MLCD_GOOGLELES_TIMESTEP_PROFILE=1 so you see running avg nonqc_zarr in the log.
+# A/B wall time: TabularBuildOptions(nonqc_strategy="auto") vs "full_timestep".
+# Uses timestep_profile=true so you see running avg nonqc_zarr in the log.
 #
 # Not comparable to `benchmark_remote_zarr_slab_reads.jl`: that script times one field / few `copyto!` patterns;
 # this script times **entire** `build_tabular` (all fields, `nt` timesteps, tabular CPU, Arrow, etc.).
@@ -31,15 +31,11 @@ function main()
     flush(stderr)
     flush(stdout)
     function _run(label::String, nonqc::String)
-        wall, out = withenv(
-            "MLCD_GOOGLELES_NONQC_STRATEGY" => nonqc,
-            "MLCD_GOOGLELES_TIMESTEP_PROFILE" => "1",
-        ) do
-            out = mktempdir(prefix="mlcd_nonqc_ab_")
-            t0 = time()
-            MLCD.GoogleLES.build_tabular(site, month, experiment, out; max_timesteps=nt, verbose=true)
-            time() - t0, out
-        end
+        opts = MLCD.TabularBuildOptions(nonqc_strategy=nonqc, timestep_profile=true)
+        out = mktempdir(prefix="mlcd_nonqc_ab_")
+        t0 = time()
+        MLCD.GoogleLES.build_tabular(site, month, experiment, out; max_timesteps=nt, verbose=true, tabular_options=opts)
+        wall = time() - t0
         println("\n>>> RESULT $label  wall_seconds=$(round(wall; digits=2))  out=$out\n")
         return (label, wall, out)
     end

@@ -60,6 +60,7 @@ write_training_diagnostics(args...) = nothing
 
 # Export submodules for use in experiments
 export Paths, WorkflowState, Dynamics, CoarseGraining, DatasetBuilder, GoogleLES, cfSites
+export TabularBuildOptions, tabular_build_options_from_env, tabular_options_with
 export DataHandling, Analysis, EnvHelpers, Common
 export Viz
 export CondensateMLP, load_processed_data, standardize_data, train_model

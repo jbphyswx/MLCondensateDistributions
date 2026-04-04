@@ -96,13 +96,106 @@ function _parse_bool_env(name::String, default::Bool)
     return lowercase(strip(raw)) in ("1", "true", "yes", "y", "on")
 end
 
-"""Read `MLCD_COARSENING_MODE` (`binary` default, or `convolutional` / `conv` for 3D block coarsening)."""
-function _parse_coarsening_mode()
-    raw = lowercase(strip(get(ENV, "MLCD_COARSENING_MODE", "binary")))
-    if raw == "convolutional" || raw == "conv"
-        return :convolutional
+"""
+    TabularBuildOptions(; kwargs...)
+
+Configuration for `GoogleLES.build_tabular` / `cfSites.build_tabular` and related loaders.
+Use explicit keyword arguments from Julia; for shell/CLI workflows call
+[`tabular_build_options_from_env`](@ref) once at the entrypoint and pass the result in.
+
+Immutable: use [`tabular_options_with`](@ref) to copy an existing options object; for env-based setup with
+overrides in one shot, use [`tabular_build_options_from_env(; kwargs...)`](@ref).
+"""
+Base.@kwdef struct TabularBuildOptions
+    coarsening_mode::Symbol = :binary
+    fullcase_bytes_limit::Int = GOOGLELES_FULLCASE_BYTES_LIMIT
+    force_fullcase::Bool = true
+    z_chunk_merge::Bool = true
+    nonqc_single_fused_load::Bool = true
+    fuse_span_z_reads::Bool = true
+    """`auto`, `per_span`, `full`, `full_timestep`, etc. (same strings as former `MLCD_GOOGLELES_NONQC_STRATEGY`)."""
+    nonqc_strategy::String = "auto"
+    timestep_profile::Bool = false
+    timestep_profile_each::Bool = false
+    skip_finite_assert_per_chunk::Bool = false
+    close_http_pools::Bool = false
+end
+
+"""
+    tabular_options_with(t::TabularBuildOptions; kwargs...)
+
+Return a new [`TabularBuildOptions`](@ref) like `t` with any given fields replaced.
+"""
+function tabular_options_with(t::TabularBuildOptions;
+    coarsening_mode = t.coarsening_mode,
+    fullcase_bytes_limit = t.fullcase_bytes_limit,
+    force_fullcase = t.force_fullcase,
+    z_chunk_merge = t.z_chunk_merge,
+    nonqc_single_fused_load = t.nonqc_single_fused_load,
+    fuse_span_z_reads = t.fuse_span_z_reads,
+    nonqc_strategy = t.nonqc_strategy,
+    timestep_profile = t.timestep_profile,
+    timestep_profile_each = t.timestep_profile_each,
+    skip_finite_assert_per_chunk = t.skip_finite_assert_per_chunk,
+    close_http_pools = t.close_http_pools,
+)
+    return TabularBuildOptions(;
+        coarsening_mode,
+        fullcase_bytes_limit,
+        force_fullcase,
+        z_chunk_merge,
+        nonqc_single_fused_load,
+        fuse_span_z_reads,
+        nonqc_strategy,
+        timestep_profile,
+        timestep_profile_each,
+        skip_finite_assert_per_chunk,
+        close_http_pools,
+    )
+end
+
+"""
+    tabular_build_options_from_env(; kwargs...)
+
+Read these `MLCD_*` variables once and return a [`TabularBuildOptions`](@ref) (CLI entrypoints only;
+in-library code should take an explicit `TabularBuildOptions` argument). Any `kwargs` override the
+corresponding env-derived fields in a **single** construction (no extra copy).
+
+| Field | Environment variable |
+|-------|----------------------|
+| `coarsening_mode` | `MLCD_COARSENING_MODE` (`binary`, `convolutional` / `conv`) |
+| `fullcase_bytes_limit` | `MLCD_GOOGLELES_FULLCASE_BYTES_LIMIT` |
+| `force_fullcase` | `MLCD_GOOGLELES_FORCE_FULLCASE` |
+| `z_chunk_merge` | `MLCD_GOOGLELES_Z_CHUNK_MERGE` |
+| `nonqc_single_fused_load` | `MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD` |
+| `fuse_span_z_reads` | `MLCD_GOOGLELES_FUSE_SPAN_Z_READS` |
+| `nonqc_strategy` | `MLCD_GOOGLELES_NONQC_STRATEGY` |
+| `timestep_profile` | `MLCD_GOOGLELES_TIMESTEP_PROFILE` |
+| `timestep_profile_each` | `MLCD_GOOGLELES_TIMESTEP_PROFILE_EACH` |
+| `skip_finite_assert_per_chunk` | `MLCD_SKIP_FINITE_ASSERT_PER_CHUNK` |
+| `close_http_pools` | `MLCD_CLOSE_HTTP_POOLS` |
+"""
+function tabular_build_options_from_env(; kw...)::TabularBuildOptions
+    coarsening_raw = lowercase(strip(get(ENV, "MLCD_COARSENING_MODE", "binary")))
+    coarsening_mode = if coarsening_raw in ("convolutional", "conv")
+        :convolutional
+    else
+        :binary
     end
-    return :binary
+    base = (;
+        coarsening_mode = coarsening_mode,
+        fullcase_bytes_limit = parse(Int, get(ENV, "MLCD_GOOGLELES_FULLCASE_BYTES_LIMIT", string(GOOGLELES_FULLCASE_BYTES_LIMIT))),
+        force_fullcase = _parse_bool_env("MLCD_GOOGLELES_FORCE_FULLCASE", true),
+        z_chunk_merge = _parse_bool_env("MLCD_GOOGLELES_Z_CHUNK_MERGE", true),
+        nonqc_single_fused_load = _parse_bool_env("MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD", true),
+        fuse_span_z_reads = _parse_bool_env("MLCD_GOOGLELES_FUSE_SPAN_Z_READS", true),
+        nonqc_strategy = String(strip(get(ENV, "MLCD_GOOGLELES_NONQC_STRATEGY", "auto"))),
+        timestep_profile = _parse_bool_env("MLCD_GOOGLELES_TIMESTEP_PROFILE", false),
+        timestep_profile_each = _parse_bool_env("MLCD_GOOGLELES_TIMESTEP_PROFILE_EACH", false),
+        skip_finite_assert_per_chunk = _parse_bool_env("MLCD_SKIP_FINITE_ASSERT_PER_CHUNK", false),
+        close_http_pools = _parse_bool_env("MLCD_CLOSE_HTTP_POOLS", false),
+    )
+    return TabularBuildOptions(; merge(base, (; kw...))...)
 end
 
 function case_arrow_filename(site_id::Int, month::Int, experiment::String)
@@ -413,7 +506,7 @@ slices when `length(orig_spans) > 1`.
 
 Single-span groups use `_load_googleles_timestep_fields_into!` (same as one `UnitRange`).
 
-Set `MLCD_GOOGLELES_FUSE_SPAN_Z_READS=0` to force one `UnitRange` read per span (legacy loop).
+Pass `fuse_span_z_reads=false` to force one `UnitRange` read per span (legacy loop).
 """
 function _load_googleles_timestep_fields_into_span_list!(
     dest::Dict{String, Array{Float32, 3}},
@@ -422,8 +515,9 @@ function _load_googleles_timestep_fields_into_span_list!(
     field_specs=GOOGLELES_FIELD_SPECS,
     orig_spans::Vector{UnitRange{Int}},
     scratch::Dict{String, AbstractArray{Float32, 3}},
+    fuse_span_z_reads::Bool=true,
 )
-    fuse = _parse_bool_env("MLCD_GOOGLELES_FUSE_SPAN_Z_READS", true)
+    fuse = fuse_span_z_reads
     if length(orig_spans) == 1 || !fuse
         for z_r in orig_spans
             _load_googleles_timestep_fields_into!(
@@ -465,8 +559,8 @@ end
     _materialize_googleles_nonqc_timestep_into!(dest, ds, timestep_idx; field_specs)
 
 Read all `field_specs` for one timestep and `copyto!` the full native `(x,y,z)` slab into
-`dest` (one Zarr access pattern per field). Used only when `MLCD_GOOGLELES_NONQC_STRATEGY`
-requests `full_timestep` (optional; default is per-span loads).
+`dest` (one Zarr access pattern per field). Used when `TabularBuildOptions.nonqc_strategy`
+requests `full` / `full_timestep` (optional; default is per-span loads).
 """
 function _materialize_googleles_nonqc_timestep_into!(
     dest::Dict{String, Array{Float32, 3}},
@@ -512,7 +606,7 @@ cloudy slabs load two z-ranges (and only the Zarr chunks those slices touch), no
 Full-column load is **opt-in** only, for local or compute-bound runs where you accept extra
 transfer.
 
-Environment `MLCD_GOOGLELES_NONQC_STRATEGY`:
+`nonqc_strategy` (same strings as former env `MLCD_GOOGLELES_NONQC_STRATEGY`):
 
 - `auto` (default), `per_span`, `sparse`, `minimal` → per-span loads only.
 - `full`, `full_timestep` → one full-column materialization per cloudy timestep.
@@ -520,14 +614,19 @@ Environment `MLCD_GOOGLELES_NONQC_STRATEGY`:
 `n_spans`, `n_keep`, `nz` are kept for call-site clarity and future policy hooks; they do not
 trigger full-column loads today.
 """
-function _googleles_use_full_nonqc_timestep_load(n_spans::Int, n_keep::Int, nz::Int)::Bool
-    mode = lowercase(strip(get(ENV, "MLCD_GOOGLELES_NONQC_STRATEGY", "auto")))
+function _googleles_use_full_nonqc_timestep_load(
+    n_spans::Int,
+    n_keep::Int,
+    nz::Int;
+    nonqc_strategy::AbstractString="auto",
+)::Bool
+    mode = lowercase(strip(nonqc_strategy))
     if mode in ("full", "full_timestep")
         return true
     elseif mode in ("auto", "per_span", "sparse", "minimal")
         return false
     else
-        @warn "Unknown MLCD_GOOGLELES_NONQC_STRATEGY=$(repr(mode)); using per-span loads."
+        @warn "Unknown nonqc_strategy=$(repr(mode)); using per-span loads."
         return false
     end
 end
@@ -700,7 +799,7 @@ end
 
 Build `span_groups` for per-span non-`q_c` Zarr loads in `build_tabular`.
 
-When `single_fused_load` is `true` (default via env `MLCD_GOOGLELES_NONQC_SINGLE_FUSED_LOAD`),
+When `single_fused_load` is `true` (default in [`TabularBuildOptions`](@ref)),
 returns `[spans]` so the timestep does **one** `_load_googleles_timestep_fields_into_span_list!`
 with all mask runs fused — same z-indices as chunk-partitioning, but **no** extra passes over
 `field_specs` for disjoint z-chunk groups.
@@ -746,14 +845,11 @@ function _has_cloud_after_2x2(q_c::AbstractArray{<:Real, 3}; threshold::Float32=
     return false
 end
 
-function _safe_close_http_pools!()
+function _safe_close_http_pools!(; close_http_pools::Bool=false)
     # Closing HTTP pools can race with background idle-monitor tasks in some
     # HTTP/OpenSSL versions and produce noisy "stream not initialized" errors.
-    # Keep this opt-in for now.
-    close_pools = lowercase(strip(get(ENV, "MLCD_CLOSE_HTTP_POOLS", "0"))) in ("1", "true", "yes", "y", "on")
-    if !close_pools
-        return
-    end
+    # Keep this opt-in via `TabularBuildOptions.close_http_pools`.
+    close_http_pools || return
 
     try
         HTTP.Connections.closeall()
