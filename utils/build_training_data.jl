@@ -155,7 +155,7 @@ Returns nothing; output is file-based.
 - `copyto!` after each span read keeps compute off lazy Zarr; a reused `scratch` dict avoids per-span `Dict` allocation.
 - Preallocated 3D buffers are reused across timesteps and spans.
 - `skip_finite_assert_per_chunk=true`: skip `_assert_finite_dataframe` on each span (final case-level check still runs).
-- `coarsening_mode=:convolutional`: 3D block coarsening (see `CoarseningPipeline.build_convolutional_coarsening_triples`); default `:binary` keeps the seed ladder + binary vertical ladder.
+- `coarsening_mode`: `:hybrid` (default), `:block` (truncated block tiling; optional explicit `:block_triples`), or `:sliding` (valid-box sliding). Divisor enumeration from native is no longer a user-facing mode; use `:block` with explicit triples if you need that schedule.
 - `timestep_profile` / `timestep_profile_each`: per-cloudy-timestep timing prints (same breakdown as before).
 
 # Error Handling
@@ -231,6 +231,10 @@ function GoogleLES.build_tabular(
         dz_native_profile = Float32.(dz_native_profile),
         seeds_h = (1,),
         coarsening_mode = opts.coarsening_mode,
+        sliding_outputs_h = opts.sliding_outputs_h,
+        sliding_outputs_v = opts.sliding_outputs_v,
+        sliding_outputs_z = opts.sliding_outputs_z,
+        sliding_window_budget_h = opts.sliding_window_budget_h,
     )
     z_schemes_native = CoarseGraining.compute_z_coarsening_scheme(spatial_info.dz_native_profile, 400f0)
     z_future_factors = Int[z_schemes_native[i][1] for i in 2:length(z_schemes_native)]
@@ -634,6 +638,10 @@ function cfSites.build_tabular(
         dz_native_profile = Float32.(dz_native_profile),
         seeds_h = (1,),
         coarsening_mode = opts.coarsening_mode,
+        sliding_outputs_h = opts.sliding_outputs_h,
+        sliding_outputs_v = opts.sliding_outputs_v,
+        sliding_outputs_z = opts.sliding_outputs_z,
+        sliding_window_budget_h = opts.sliding_window_budget_h,
     )
 
     final_df = nothing

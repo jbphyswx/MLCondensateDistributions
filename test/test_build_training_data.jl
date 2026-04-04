@@ -31,3 +31,19 @@ Test.@testset "build_training_data dimension helpers" begin
 
     Test.@test_throws ErrorException MLCD._perm_to_txyz((:z, :y, :x, :q))
 end
+
+Test.@testset "tabular_build_options_from_env coarsening_mode" begin
+    withenv("MLCD_COARSENING_MODE" => "hybrid") do
+        Test.@test MLCD.tabular_build_options_from_env().coarsening_mode === :hybrid
+    end
+    withenv("MLCD_COARSENING_MODE" => "block") do
+        Test.@test MLCD.tabular_build_options_from_env().coarsening_mode === :block
+    end
+    withenv("MLCD_COARSENING_MODE" => "sliding") do
+        Test.@test MLCD.tabular_build_options_from_env().coarsening_mode === :sliding
+    end
+    # Legacy shell exports should not hard-error (map to hybrid with @warn maxlog=1)
+    withenv("MLCD_COARSENING_MODE" => "convolutional") do
+        Test.@test MLCD.tabular_build_options_from_env().coarsening_mode === :hybrid
+    end
+end

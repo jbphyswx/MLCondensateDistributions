@@ -5,6 +5,9 @@ using Statistics: Statistics
 include("array_utils.jl")
 using .ArrayUtils
 
+@inline uniform_stride_for_valid_box(n::Int, w::Int, k::Int) = ArrayUtils.uniform_stride_for_valid_box(n, w, k)
+@inline valid_box_anchor_starts(n::Int, w::Int, k::Int) = ArrayUtils.valid_box_anchor_starts(n, w, k)
+
 export build_horizontal_levels,
     build_convolutional_coarsening_triples,
     coarsen_fields_at_level,
@@ -18,6 +21,10 @@ export build_horizontal_levels,
     coarsen_products_3d_block,
     coarsen_fields_valid_box,
     coarsen_products_valid_box,
+    coarsen_fields_valid_box_at_starts,
+    coarsen_products_valid_box_at_starts,
+    uniform_stride_for_valid_box,
+    valid_box_anchor_starts,
     covariance_from_moments,
     build_horizontal_multilevel_views
 
@@ -211,6 +218,19 @@ function coarsen_fields_valid_box(
     return NamedTuple{FN}(vals)
 end
 
+function coarsen_fields_valid_box_at_starts(
+    fields::NamedTuple{FN, FV},
+    wx::Int,
+    wy::Int,
+    wz::Int,
+    ix::AbstractVector{Int},
+    iy::AbstractVector{Int},
+    iz::AbstractVector{Int},
+) where {FN, FV <: Tuple}
+    vals = map(arr -> Array(conv3d_valid_box_mean_at_starts(arr, wx, wy, wz, ix, iy, iz)), values(fields))
+    return NamedTuple{FN}(vals)
+end
+
 """
     coarsen_products_valid_box(fields, product_pairs, wx, wy, wz; stride_h=1, stride_v=1, stride_z=1)
 
@@ -232,6 +252,26 @@ function coarsen_products_valid_box(
         y = _container_get_field(fields, _field_name_key(y_name))
         size(x) == size(y) || throw(DimensionMismatch("Fields for product $(out_name) have mismatched sizes"))
         Array(conv3d_valid_box_product_mean(x, y, wx, wy, wz; stride_h, stride_v, stride_z))
+    end
+    return NamedTuple{PN}(vals)
+end
+
+function coarsen_products_valid_box_at_starts(
+    fields::NamedTuple{FN, FV},
+    product_pairs::NamedTuple{PN, PV},
+    wx::Int,
+    wy::Int,
+    wz::Int,
+    ix::AbstractVector{Int},
+    iy::AbstractVector{Int},
+    iz::AbstractVector{Int},
+) where {FN, FV <: Tuple, PN, PV <: Tuple}
+    vals = map(PN) do out_name
+        x_name, y_name = getproperty(product_pairs, out_name)
+        x = _container_get_field(fields, _field_name_key(x_name))
+        y = _container_get_field(fields, _field_name_key(y_name))
+        size(x) == size(y) || throw(DimensionMismatch("Fields for product $(out_name) have mismatched sizes"))
+        Array(conv3d_valid_box_product_mean_at_starts(x, y, wx, wy, wz, ix, iy, iz))
     end
     return NamedTuple{PN}(vals)
 end

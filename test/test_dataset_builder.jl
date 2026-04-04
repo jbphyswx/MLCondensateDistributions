@@ -44,7 +44,7 @@ Test.@testset "Dataset Builder Orchestration Unit Test" begin
         :domain_h => 6000.0f0,
         :min_h_resolution => 100.0f0,
         :dz_native_profile => fill(25.0f0, 16), # 16 vertical levels to match dims
-        :coarsening_mode => :binary,
+        :coarsening_mode => :hybrid,
     )
     
     @info "Piping through process_abstract_chunk..."
@@ -121,7 +121,7 @@ Test.@testset "GoogleLES metadata schema regression" begin
         :domain_h => 6000.0f0,
         :min_h_resolution => 100.0f0,
         :dz_native_profile => fill(25.0f0, 16),
-        :coarsening_mode => :binary,
+        :coarsening_mode => :hybrid,
     )
 
     df = DatasetBuilder.process_abstract_chunk(fine_fields, metadata, spatial_info)

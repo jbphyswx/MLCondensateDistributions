@@ -14,6 +14,7 @@ Cross-reference: `VERTICAL_COARSENING_PLAN.md` (vertical ladder & z-dropping rul
 - [ ] **Hybrid (proposed default)**: Run **fast block-reduction towers** where they tile cleanly, and use **sliding windows** to **fill scale gaps** between what blocks can represent (e.g. between `nh` and `⌊nx/2⌋` coverage — exact gap definition in §4.3).
 - [ ] **Deprecate `binary` as a user-facing mode**: Internally becomes a **schedule** over **block factors** (powers of two, etc.), not a separate mathematical world.
 - [ ] **Tests & perf**: Correctness vs reference (small grids), regression on row counts / statistics, benchmarks on realistic `nx, ny, nz`.
+- [ ] **Terabyte-scale defaults**: Processing must stay tractable on huge corpora — **prefer block/non-overlapping** where it applies; for sliding/conv, **default to the fewest useful origins** (large strides, bounded output count per axis) and **a small, linearly spaced set of window sizes** — not dense stride-1 and not every integer window from `N/2` to `N−1`.
 
 Non-goals (initially):
 
@@ -38,7 +39,7 @@ Define **immutable** config types (names negotiable):
 | Type | Semantics | Output grid |
 |------|-----------|-------------|
 | `BlockReductionSpec` | Non-overlapping `nh×mh×nz` blocks on **truncated** subdomain | `⌊nx/nh⌋ × ⌊ny/mh⌋ × ⌊nz/nz_blk⌋` (per application) |
-| `SlidingConvolutionSpec` | Box window, stride `s` (default `s = 1` for “true” sliding), valid / same padding policy TBD | See §5 |
+| `SlidingConvolutionSpec` | Valid box, stride `s` — **default is sparse** (few origins per axis, e.g. **2** to cover left/right); optional dense `s = 1` for research | See §5 |
 | `HybridReductionSpec` | Holds `BlockReductionSpec` schedule + `SlidingConvolutionSpec` targets for **gap scales** | Union of outputs (tagged by `reduction_kind` metadata) |
 
 **Dispatch rule**: `process_chunk(fields, reducer::AbstractReductionSpec, ...)` or equivalent — **one** internal pipeline per type; hybrid orchestrates the other two.
@@ -69,7 +70,7 @@ Domain **124×124** native, `dx = 50 m`, target **≥ 1 km** ⇒ need `nh × 50 
 
 ### 4.3 “Largest block nh ≤ N/2” and the hybrid gap
 
-Non-overlapping blocks of size `nh` can only tile at most **`⌊N/nh⌋`** windows; the **effective** coverage gap the user cares about is: **desired physical scales** that do **not** correspond to an integer `nh` that tiles **and** meets `min_h`. **Sliding** convolution can produce outputs at **every** origin (stride 1) with window size tied to physical Δh, filling scales **between** block-only ladders.
+Non-overlapping blocks of size `nh` can only tile at most **`⌊N/nh⌋`** windows; the **effective** coverage gap the user cares about is: **desired physical scales** that do **not** correspond to an integer `nh` that tiles **and** meets `min_h`. **Sliding** convolution **can** produce outputs at **many** origins (stride 1) for research, but **defaults** use **sparse** origins (§5.5) with window sizes from a **small schedule** (§5.6), filling scales **between** block-only ladders without dense grids.
 
 Hybrid default (conceptual):
 
@@ -77,6 +78,12 @@ Hybrid default (conceptual):
 - [ ] **Phase B — sliding**: For each **target Δh** (and Δz) **not** hit by Phase A within tolerance, run sliding local moments on **native** (or on a **fine-enough** cached grid — only if bit-exact equivalence proven).
 
 Document **tolerance** (e.g. 5% on Δh) in config.
+
+### 4.4 Default relationship: blocks vs sliding
+
+- **Non-overlapping windows** along a direction are **mathematically the same family** as **truncated block reduction** (§4). The **default pipeline** should **prefer the block path** for those scales — it is cheaper and matches the “tower” story.
+- **Sliding** is for **overlap** (smaller stride than block width), **gaps** (stride larger than block width so windows do not touch), or **large windows** where **at most one** non-overlapping tile fits — in the latter case the **default sparse sliding** collapses to something like **two origins per axis** (e.g. **2×2** placements in the horizontal plane) so the domain is still **sampled** without a stride-1 quadratic output grid.
+- Users can still request **denser** sliding (more outputs, smaller stride) when they need it; defaults optimize for **throughput** over sub-pixel shifts of the window.
 
 ---
 
@@ -106,7 +113,24 @@ For each output cell `(i,j,k)` and window `Wh×Wh×Wz` (square horizontal defaul
 ### 5.4 Boundaries
 
 - [ ] **Valid** convolution only (shrink output) for v1 — matches “no ghost / no periodic” spirit of block truncation.
-- [ ] Document output sizes: `(nx - Wh + 1) × …` for stride 1 valid.
+- [ ] Document output sizes: for stride `s`, horizontal extent is `⌊(nx − Wh) / s⌋ + 1` (and analogously `y`, `z`) when `nx ≥ Wh`; zero outputs if `nx < Wh`.
+
+### 5.5 Stride / output-count defaults (sparse coverage)
+
+**Goal:** Few origins, large effective step — **tiny shifts of the window add little information** relative to the volume of LES data; stride-1 output grids are **quadratic** in domain extent and are **not** the default.
+
+- [ ] Expose a **target output count per axis** `K` (default **`2`**: first valid window at the **low-index** origin, last aligned toward the **far edge** — e.g. `Wh = 70`, `nx = 124` ⇒ stride `54` ⇒ **2** starts along `x`).
+- [ ] **User override:** explicit integer **strides** `stride_h`, `stride_v`, `stride_z` (or env / `spatial_info`) for **overlap** or **gaps**.
+- [ ] **Divisibility / `K > 2`:** Prefer **approximately even coverage** of the domain along each axis. Use a **simple rule**: derive a **floating** ideal spacing `(nx − Wh) / (K − 1)`, map to **integer stride** by **rounding** (document whether `round` / `floor` / `ceil`), then **adjust** so the realized output count **never exceeds `K`** (avoid extra work — **more than `K` outputs is unacceptable** for the default budget). Small **asymmetry** at the right/top edge is acceptable if it preserves the output cap and near-uniform spacing.
+- [ ] Record resolved strides and target `K` in metadata (§6).
+
+### 5.6 Window-size schedule (avoid enumerating every width)
+
+Enumerating **every** horizontal window size from **`⌊N/2⌋` to `N−1`** (e.g. **65…123** on **124×124**) is **another quadratic-style blow-up**. **Block reductions** already fill many scales; sliding/convolution should **not** repeat that enumeration by default.
+
+- [ ] Add a configurable **budget** of window sizes (default on the order of **`5`**, linearly or **evenly spaced** in index space between a **minimum** from physics (`min_h`, `dx`, `min_dz` / `dz_ref`) and a **maximum** (e.g. `min(nx, ny)` or policy “below full domain” so blocks own the largest non-overlapping scales).
+- [ ] Apply the same idea to **pure convolution / sliding modes** that iterate over window sizes: **default = subsampled schedule**, not all integers.
+- [ ] **Override:** user supplies an explicit list of `(Wh, Wz)` or triples when they need full coverage.
 
 ---
 
@@ -115,7 +139,7 @@ For each output cell `(i,j,k)` and window `Wh×Wh×Wz` (square horizontal defaul
 Every emitted row / column group must record:
 
 - [ ] `reduction_kind`: `:block_truncated` | `:sliding_valid` | `:hybrid_block` | `:hybrid_sliding`
-- [ ] `nh`, `mh`, `nz_blk` **or** `window_h`, `window_z`, `stride`
+- [ ] `nh`, `mh`, `nz_blk` **or** `window_h`, `window_z`, `stride` — plus optional `sliding_outputs_h` / resolved stride after subsampling policy
 - [ ] `resolution_h`, `resolution_z` (physical, as today)
 - [ ] `truncation_x`, `truncation_y`, `truncation_z` (counts dropped)
 - [ ] `native_nx`, `native_ny`, `native_nz` (for debugging)
@@ -156,7 +180,7 @@ Checklist:
 
 ### Phase 0 — Spec & scaffolding
 
-- [ ] Land this doc; team sign-off on **truncation corner** and **stride** defaults.
+- [ ] Land this doc; team sign-off on **truncation corner**, **sparse stride / output-count defaults** (§5.5), and **window-size budget** (§5.6).
 - [ ] Introduce `AbstractReductionSpec` + structs **without** wiring full pipeline.
 - [ ] Add **no-op** or stub dispatch that errors with clear message.
 
@@ -186,6 +210,12 @@ Checklist:
 - [ ] Make **hybrid** the default in `tabular_build_options_from_env`.
 - [ ] Integration test: one LES slice (or mocked data) end-to-end.
 
+### Phase 5b — Sparse sliding + window budgets (operational defaults)
+
+- [x] Implement §5.5–5.6: `uniform_stride_for_valid_box` in [`utils/array_utils.jl`](utils/array_utils.jl); `_resolve_sliding_strides` + `spatial_info` / `TabularBuildOptions` (`sliding_outputs_*`, `sliding_window_budget_h`, env `MLCD_SLIDING_*`); explicit `sliding_stride_*` overrides auto stride.
+- [x] Subsample sliding **window sizes**: [`sliding_reduction_triples`](utils/reduction_specs.jl), [`hybrid_sliding_extra_sizes_default`](utils/reduction_specs.jl) vs block ladder; `sliding_window_budget_h` (default 5).
+- [ ] Regression / perf test: large `nx`, `ny` shows **linear** scaling in domain size for default sliding cost vs stride-1 baseline.
+
 ### Phase 6 — Deprecate & delete legacy
 
 - [ ] Redirect `:binary` / old `:convolutional` to new specs; remove divisor enumerator.
@@ -197,7 +227,9 @@ Checklist:
 
 - [ ] **Truncation**: remainder sizes 0, 1, `nh-1`, `nh`, `N-1`.
 - [ ] **Prime / composite** `nx` — block schedule still defined by physics, not divisibility.
-- [ ] **Sliding**: stride 1 valid; compare means/products to reference.
+- [ ] **Sliding**: stride 1 valid (reference / opt-in dense mode); compare means/products to reference.
+- [ ] **Sparse sliding**: default `K = 2` matches hand-computed corner windows; `K > 2` respects **≤ K** outputs and approximate spacing.
+- [ ] **Window schedule**: default budget yields **≤ configured** distinct `Wh` (and `Wz`) values.
 - [ ] **Regression**: snapshot row counts for a fixed small case (or tolerance on statistics).
 - [ ] **Thread safety** (if threaded): same results as serial.
 
@@ -209,6 +241,12 @@ Checklist:
 - [ ] **Hybrid planner**: exact rule for “gap” — absolute meters vs relative to `dx*nh`?
 - [ ] **cfSites** path: same reducer specs or separate defaults?
 - [ ] **Arrow duplication**: hybrid may emit **two** rows for “similar” Δh from block vs sliding — deduplicate in planner or keep both with distinct `reduction_kind`?
+
+**Defaults (Phase 5b — implemented in code, see `dataset_builder_impl` + `reduction_specs`):**
+
+- Prefer **block** for non-overlapping scales; **sparse sliding** when overlap/gaps or **large windows** demand it; **default `K = 2`** origins per axis unless configured otherwise.
+- **`K > 2`:** even spacing with **integer stride rounding**, **never more than `K` outputs**; slight edge asymmetry OK.
+- **Window sizes:** default **~5** evenly spaced candidates — not every integer; **block path** fills most scales operationally.
 
 ---
 
@@ -223,4 +261,4 @@ Checklist:
 
 ---
 
-*Last updated: implementation plan draft for reducer refactor (block / sliding / hybrid).*
+*Last updated: added terabyte-scale defaults — sparse strides (§5.5), subsampled window schedules (§5.6), block-first vs sliding (§4.4), Phase 5b.*

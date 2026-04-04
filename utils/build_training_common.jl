@@ -119,6 +119,12 @@ Base.@kwdef struct TabularBuildOptions
     timestep_profile_each::Bool = false
     skip_finite_assert_per_chunk::Bool = false
     close_http_pools::Bool = false
+    """Max valid-box outputs per axis when strides are auto-derived (default 2 = corner sampling)."""
+    sliding_outputs_h::Int = 2
+    sliding_outputs_v::Int = 2
+    sliding_outputs_z::Int = 2
+    """Subsampled horizontal window count for `:sliding` and hybrid sliding extras."""
+    sliding_window_budget_h::Int = 5
 end
 
 """
@@ -138,6 +144,10 @@ function tabular_options_with(t::TabularBuildOptions;
     timestep_profile_each = t.timestep_profile_each,
     skip_finite_assert_per_chunk = t.skip_finite_assert_per_chunk,
     close_http_pools = t.close_http_pools,
+    sliding_outputs_h = t.sliding_outputs_h,
+    sliding_outputs_v = t.sliding_outputs_v,
+    sliding_outputs_z = t.sliding_outputs_z,
+    sliding_window_budget_h = t.sliding_window_budget_h,
 )
     return TabularBuildOptions(;
         coarsening_mode,
@@ -151,6 +161,10 @@ function tabular_options_with(t::TabularBuildOptions;
         timestep_profile_each,
         skip_finite_assert_per_chunk,
         close_http_pools,
+        sliding_outputs_h,
+        sliding_outputs_v,
+        sliding_outputs_z,
+        sliding_window_budget_h,
     )
 end
 
@@ -179,7 +193,7 @@ corresponding env-derived fields in a **single** construction (no extra copy).
 
 | Field | Environment variable |
 |-------|----------------------|
-| `coarsening_mode` | `MLCD_COARSENING_MODE` (`hybrid` default, `block`, `sliding`, `binary` deprecated, `convolutional` deprecated) |
+| `coarsening_mode` | `MLCD_COARSENING_MODE` (`hybrid` default, `block`, `sliding`; legacy `binary` / `convolutional` warn once and map to `hybrid`) |
 | `fullcase_bytes_limit` | `MLCD_GOOGLELES_FULLCASE_BYTES_LIMIT` |
 | `force_fullcase` | `MLCD_GOOGLELES_FORCE_FULLCASE` |
 | `z_chunk_merge` | `MLCD_GOOGLELES_Z_CHUNK_MERGE` |
@@ -190,6 +204,10 @@ corresponding env-derived fields in a **single** construction (no extra copy).
 | `timestep_profile_each` | `MLCD_GOOGLELES_TIMESTEP_PROFILE_EACH` |
 | `skip_finite_assert_per_chunk` | `MLCD_SKIP_FINITE_ASSERT_PER_CHUNK` |
 | `close_http_pools` | `MLCD_CLOSE_HTTP_POOLS` |
+| `sliding_outputs_h` | `MLCD_SLIDING_OUTPUTS_H` |
+| `sliding_outputs_v` | `MLCD_SLIDING_OUTPUTS_V` |
+| `sliding_outputs_z` | `MLCD_SLIDING_OUTPUTS_Z` |
+| `sliding_window_budget_h` | `MLCD_SLIDING_WINDOW_BUDGET_H` |
 """
 function tabular_build_options_from_env(; kw...)::TabularBuildOptions
     coarsening_raw = lowercase(strip(get(ENV, "MLCD_COARSENING_MODE", "hybrid")))
@@ -199,12 +217,16 @@ function tabular_build_options_from_env(; kw...)::TabularBuildOptions
         :block
     elseif coarsening_raw == "sliding"
         :sliding
-    elseif coarsening_raw in ("convolutional", "conv", "legacy_conv", "divisor_conv")
-        :convolutional
-    elseif coarsening_raw in ("binary", "legacy_binary")
-        :binary
+    elseif coarsening_raw in ("binary", "legacy_binary", "convolutional", "conv", "legacy_conv", "divisor_conv")
+        @warn(
+            "MLCD_COARSENING_MODE is $(repr(coarsening_raw)) (removed as a distinct mode); using :hybrid. " *
+            "Set MLCD_COARSENING_MODE=hybrid, block, or sliding explicitly. " *
+            "For a fixed list of 3D block factors from native grid extents, use :block with spatial_info :block_triples (see dataset builder docs).",
+            maxlog = 1,
+        )
+        :hybrid
     else
-        throw(ArgumentError("MLCD_COARSENING_MODE=$(repr(coarsening_raw)) is not recognized; use hybrid, block, sliding, binary, or convolutional."))
+        throw(ArgumentError("MLCD_COARSENING_MODE=$(repr(coarsening_raw)) is not recognized; use hybrid, block, or sliding."))
     end
     base = (;
         coarsening_mode = coarsening_mode,
@@ -218,6 +240,10 @@ function tabular_build_options_from_env(; kw...)::TabularBuildOptions
         timestep_profile_each = _parse_bool_env("MLCD_GOOGLELES_TIMESTEP_PROFILE_EACH", false),
         skip_finite_assert_per_chunk = _parse_bool_env("MLCD_SKIP_FINITE_ASSERT_PER_CHUNK", false),
         close_http_pools = _parse_bool_env("MLCD_CLOSE_HTTP_POOLS", false),
+        sliding_outputs_h = max(1, parse(Int, get(ENV, "MLCD_SLIDING_OUTPUTS_H", "2"))),
+        sliding_outputs_v = max(1, parse(Int, get(ENV, "MLCD_SLIDING_OUTPUTS_V", "2"))),
+        sliding_outputs_z = max(1, parse(Int, get(ENV, "MLCD_SLIDING_OUTPUTS_Z", "2"))),
+        sliding_window_budget_h = max(1, parse(Int, get(ENV, "MLCD_SLIDING_WINDOW_BUDGET_H", "5"))),
     )
     return TabularBuildOptions(; merge(base, (; kw...))...)
 end

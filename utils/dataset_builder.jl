@@ -72,7 +72,7 @@ function flatten_and_filter!(
     resolution_h::FT,
     domain_h::FT,
     metadata;
-    reduction_kind::AbstractString = "binary",
+    reduction_kind::AbstractString = "hybrid",
     reduction_nh::Int = -1,
     reduction_fz::Int = -1,
     truncation_x::Int = -1,

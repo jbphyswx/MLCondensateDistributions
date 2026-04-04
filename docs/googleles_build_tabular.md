@@ -75,6 +75,18 @@ Set **`MLCD_GOOGLELES_TIMESTEP_PROFILE=1`** when calling `GoogleLES.build_tabula
 
 Regression tests: `test/test_googleles_timestep_profile.jl` (profile accumulator), `test/test_googleles_nonqc_strategy.jl` (`MLCD_GOOGLELES_NONQC_STRATEGY` parsing).
 
+## Coarsening mode (`TabularBuildOptions` / `MLCD_COARSENING_MODE`)
+
+Tabular rows are built via `DatasetBuilderImpl.process_abstract_chunk`, driven by `opts.coarsening_mode` (from `TabularBuildOptions` or `tabular_build_options_from_env()`):
+
+| Mode | Meaning |
+|------|--------|
+| `hybrid` | Default: block ladder where appropriate + sliding valid-box samples for gap scales. |
+| `block` | Truncated non-overlapping 3D blocks; optional explicit factor list via `spatial_info.block_triples` in library callers. |
+| `sliding` | Sliding valid-box reductions only (see `sliding_outputs_*` / optional `sliding_stride_*` in `spatial_info`). |
+
+Shell / batch scripts: set `MLCD_COARSENING_MODE` to `hybrid`, `block`, or `sliding`. Older env values such as `convolutional` or `binary` still parse but log a deprecation warning and behave as `hybrid`.
+
 ## Related docs
 
 - [v2_remote_load_reduction_questions.md](v2_remote_load_reduction_questions.md) — remote Zarr behavior, benchmarks, and the lazy-view gridlock failure mode.

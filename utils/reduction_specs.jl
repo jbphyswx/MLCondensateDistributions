@@ -14,6 +14,9 @@ export AbstractReductionSpec,
     crop_ranges_3d,
     truncated_horizontal_sizes,
     block_reduction_triples,
+    sliding_reduction_triples,
+    subsample_closed_range,
+    hybrid_sliding_extra_sizes_default,
     default_hybrid_sliding_windows,
     merge_reduction_metadata
 
@@ -31,7 +34,8 @@ struct BlockReductionSpec <: AbstractReductionSpec end
 """
     SlidingConvolutionSpec(; stride_h=1, stride_v=1, stride_z=1)
 
-Valid (non-padded) sliding box averages; stride defaults to 1.
+Valid (non-padded) sliding box averages. In `DatasetBuilderImpl`, strides default from
+`spatial_info.sliding_outputs_*` (sparse placement) unless `sliding_stride_*` is set explicitly.
 """
 Base.@kwdef struct SlidingConvolutionSpec <: AbstractReductionSpec
     stride_h::Int = 1
@@ -123,6 +127,90 @@ function block_reduction_triples(
     unique!(triples)
     sort!(triples; by = t -> (t[3], t[1], t[2]))
     return triples
+end
+
+"""
+    subsample_closed_range(lo, hi, n) -> Vector{Int}
+
+Up to `n` distinct integers in `[lo, hi]`, approximately evenly spaced (endpoints included
+when `n >= 2`). If `hi - lo + 1 <= n`, returns `lo:hi`.
+"""
+function subsample_closed_range(lo::Int, hi::Int, n::Int)::Vector{Int}
+    n < 1 && return Int[]
+    lo > hi && return Int[]
+    len = hi - lo + 1
+    len <= n && return collect(lo:hi)
+    n == 1 && return Int[clamp(lo + div(hi - lo, 2), lo, hi)]
+    out = Int[]
+    for i in 1:n
+        v = lo + round(Int, (i - 1) * (hi - lo) / (n - 1))
+        push!(out, clamp(v, lo, hi))
+    end
+    sort!(unique!(out))
+    return out
+end
+
+"""
+    sliding_reduction_triples(nx, ny, nz, dx, min_h, dz_ref, max_dz; horizontal_budget=5)
+
+Like [`block_reduction_triples`](@ref) but horizontal window sizes are **subsampled** to at
+most `horizontal_budget` values evenly spaced between `ceil(min_h/dx)` and `min(nx,ny)`,
+instead of the full geometric ladder (keeps sliding-only mode cheap on large domains).
+"""
+function sliding_reduction_triples(
+    nx::Int,
+    ny::Int,
+    nz::Int,
+    dx::T,
+    min_h::T,
+    dz_ref::T,
+    max_dz::T;
+    horizontal_budget::Int = 5,
+    square_horizontal::Bool = true,
+)::Vector{NTuple{3,Int}} where {T <: Real}
+    horizontal_budget >= 1 || throw(ArgumentError("horizontal_budget must be >= 1"))
+    nh_min = max(1, ceil(Int, min_h / dx))
+    nh_max = min(nx, ny)
+    whs = subsample_closed_range(nh_min, nh_max, horizontal_budget)
+    triples = NTuple{3,Int}[]
+    for wh in whs
+        if square_horizontal
+            for fz in 1:nz
+                mod(nz, fz) != 0 && continue
+                fz * dz_ref > max_dz && continue
+                push!(triples, (wh, wh, fz))
+            end
+        end
+    end
+    unique!(triples)
+    sort!(triples; by = t -> (t[3], t[1], t[2]))
+    return triples
+end
+
+"""
+    hybrid_sliding_extra_sizes_default(nx, ny, dx, min_h, block_nhs; budget=5)
+
+Horizontal window sizes for hybrid **sliding** passes: up to `budget` subsampled sizes in
+`[nh_min, nh_max]` that are **not** already covered by block reductions (`block_nhs`). If
+that set is empty, falls back to [`default_hybrid_sliding_windows`](@ref).
+"""
+function hybrid_sliding_extra_sizes_default(
+    nx::Int,
+    ny::Int,
+    dx::T,
+    min_h::T,
+    block_nhs::AbstractSet{Int};
+    budget::Int = 5,
+)::Vector{Int} where {T <: Real}
+    budget >= 1 || throw(ArgumentError("budget must be >= 1"))
+    nh_min = max(1, ceil(Int, min_h / dx))
+    nh_max = min(nx, ny)
+    cand = subsample_closed_range(nh_min, nh_max, budget)
+    extra = filter(w -> !(w in block_nhs), cand)
+    if !isempty(extra)
+        return extra
+    end
+    return default_hybrid_sliding_windows(nx, ny, dx, min_h)
 end
 
 """

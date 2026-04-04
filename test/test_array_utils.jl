@@ -110,6 +110,40 @@ Test.@testset "ArrayUtils 3D pooling in-place zero allocations" begin
     Test.@test allocs == 0
 end
 
+Test.@testset "ArrayUtils valid_box_anchor_starts (corner-preserving K samples)" begin
+    # n=10, window=3 → valid starts 1..8; k=3 → [1,4,8] (not uniform stride)
+    ix = valid_box_anchor_starts(10, 3, 3)
+    Test.@test ix == Int[1, 4, 8]
+    Test.@test valid_box_anchor_starts(124, 70, 3) == Int[1, 28, 55]
+    # Only one valid placement: cap k to L (default sliding_outputs=2 must not error)
+    Test.@test valid_box_anchor_starts(16, 16, 2) == Int[1]
+    Test.@test valid_box_anchor_starts(6, 6, 3) == Int[1]
+    a = zeros(Float32, 10, 10, 4)
+    a[1, 1, 1] = 1.0f0
+    a[8, 8, 1] = 1.0f0
+    ix2 = valid_box_anchor_starts(10, 3, 2)
+    iy2 = valid_box_anchor_starts(10, 3, 2)
+    iz2 = valid_box_anchor_starts(4, 2, 2)
+    out = conv3d_valid_box_mean_at_starts(a, 3, 3, 2, ix2, iy2, iz2)
+    Test.@test out[1, 1, 1] > 0
+    Test.@test out[2, 2, 1] > 0
+end
+
+Test.@testset "ArrayUtils uniform_stride_for_valid_box" begin
+    Test.@test uniform_stride_for_valid_box(124, 70, 2) == 54
+    Test.@test valid_box_output_extent(124, 70, 54) == 2
+    # K=3, span=54 → prefer stride 27 with 3 outputs
+    Test.@test uniform_stride_for_valid_box(124, 70, 3) == 27
+    Test.@test valid_box_output_extent(124, 70, 27) == 3
+    # span=55, K=3 → stride 27 gives 3 outputs and is closest to ideal 27.5
+    Test.@test uniform_stride_for_valid_box(125, 70, 3) == 27
+    Test.@test valid_box_output_extent(125, 70, 27) == 3
+    for k in 1:4
+        s = uniform_stride_for_valid_box(80, 10, k)
+        Test.@test valid_box_output_extent(80, 10, s) <= k
+    end
+end
+
 Test.@testset "ArrayUtils conv3d_valid_box_mean vs brute force" begin
     nx, ny, nz = 7, 8, 5
     data = rand(Float32, nx, ny, nz)

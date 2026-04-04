@@ -11,8 +11,93 @@ using ..ReductionSpecs
 
 export process_abstract_chunk_impl
 
-const _DEPWARN_BINARY = Ref(true)
-const _DEPWARN_LEGACY_CONV = Ref(true)
+@inline function _spatial_has(spatial_info::AbstractDict{Symbol}, key::Symbol)
+    return haskey(spatial_info, key)
+end
+@inline function _spatial_has(spatial_info, key::Symbol)
+    return hasproperty(spatial_info, key)
+end
+
+function _resolve_sliding_strides(
+    spatial_info,
+    nx::Int,
+    ny::Int,
+    nz::Int,
+    wh::Int,
+    wz::Int,
+    kh::Int,
+    kv::Int,
+    kz::Int,
+)
+    stride_h = if _spatial_has(spatial_info, :sliding_stride_h)
+        Int(_spatial_lookup(spatial_info, :sliding_stride_h, 1))
+    else
+        Int(uniform_stride_for_valid_box(nx, wh, kh))
+    end
+    stride_v = if _spatial_has(spatial_info, :sliding_stride_v)
+        Int(_spatial_lookup(spatial_info, :sliding_stride_v, 1))
+    else
+        Int(uniform_stride_for_valid_box(ny, wh, kv))
+    end
+    stride_z = if _spatial_has(spatial_info, :sliding_stride_z)
+        Int(_spatial_lookup(spatial_info, :sliding_stride_z, 1))
+    else
+        Int(uniform_stride_for_valid_box(nz, wz, kz))
+    end
+    return stride_h, stride_v, stride_z
+end
+
+@inline function _sliding_uses_explicit_strides(spatial_info)
+    return _spatial_has(spatial_info, :sliding_stride_h) ||
+        _spatial_has(spatial_info, :sliding_stride_v) ||
+        _spatial_has(spatial_info, :sliding_stride_z)
+end
+
+function _coarsen_sliding_valid_box(
+    fields::NamedTuple,
+    product_pairs::NamedTuple,
+    spatial_info,
+    nx::Int,
+    ny::Int,
+    nz::Int,
+    wh::Int,
+    wz::Int,
+    kh::Int,
+    kv::Int,
+    kz::Int,
+)
+    if _sliding_uses_explicit_strides(spatial_info)
+        stride_h, stride_v, stride_z = _resolve_sliding_strides(
+            spatial_info,
+            nx,
+            ny,
+            nz,
+            wh,
+            wz,
+            kh,
+            kv,
+            kz,
+        )
+        means = coarsen_fields_valid_box(fields, wh, wh, wz; stride_h, stride_v, stride_z)
+        prods = coarsen_products_valid_box(fields, product_pairs, wh, wh, wz; stride_h, stride_v, stride_z)
+        nxo = div(nx - wh, stride_h) + 1
+        nyo = div(ny - wh, stride_v) + 1
+        nzo = div(nz - wz, stride_z) + 1
+        trunc_x = nx - (stride_h * (nxo - 1) + wh)
+        trunc_y = ny - (stride_v * (nyo - 1) + wh)
+        trunc_z = nz - (stride_z * (nzo - 1) + wz)
+        return means, prods, trunc_x, trunc_y, trunc_z
+    end
+    ix = valid_box_anchor_starts(nx, wh, kh)
+    iy = valid_box_anchor_starts(ny, wh, kv)
+    iz = valid_box_anchor_starts(nz, wz, kz)
+    means = coarsen_fields_valid_box_at_starts(fields, wh, wh, wz, ix, iy, iz)
+    prods = coarsen_products_valid_box_at_starts(fields, product_pairs, wh, wh, wz, ix, iy, iz)
+    trunc_x = nx - (ix[end] + wh - 1)
+    trunc_y = ny - (iy[end] + wh - 1)
+    trunc_z = nz - (iz[end] + wz - 1)
+    return means, prods, trunc_x, trunc_y, trunc_z
+end
 
 @inline function _as_f32_array3(x::Array{Float32, 3})
     return x
@@ -137,21 +222,17 @@ Build one tabular training chunk from fine-resolution 3D LES fields.
 - `metadata`: run/case metadata attached to emitted rows.
     Can be either an `AbstractDict{Symbol}` or a named tuple with matching keys.
 - `spatial_info`: grid metadata. Required fields: `dx_native`, `domain_h`,
-    `dz_native_profile`. Optional fields: `min_h_resolution`, `seeds_h`,
-    `coarsening_mode` (`:binary` default, or `:convolutional` for 3D block means at
-    many `(fx,fy,fz)` triples via [`CoarseningPipeline.build_convolutional_coarsening_triples`](@ref)),
-    `convolutional_square_horizontal` (default `true`), `convolutional_triples` (optional explicit
-    `Vector{NTuple{3,Int}}` overriding the auto schedule).
+    `dz_native_profile`. Optional: `min_h_resolution`, `coarsening_mode` (`:hybrid` default,
+    `:block`, `:sliding`), `block_triples` (explicit `(fx,fy,fz)` list for `:block`),
+    `block_square_horizontal` (for `:block`; legacy alias `convolutional_square_horizontal`),
+    `sliding_outputs_*`, `sliding_window_budget_h`, optional `sliding_stride_*` (forces uniform stride).
 - `max_dz`: maximum effective vertical spacing used to build the vertical
     coarsening scheme.
 
 # Algorithm
 
-1. Derive cloud-presence indicator fields from `clw` and `cli`.
-2. Build horizontal coarsening levels and iteratively coarsen means/products.
-3. For each horizontal level, apply vertical coarsening stages.
-4. At each stage, compute moments/covariances/TKE and construct a drop mask
-     (clear-air, dropped-z, non-finite).
+Modes `:hybrid`, `:block`, and `:sliding` apply truncated-block and/or sparse valid-box
+reductions (see `docs/COARSENING_REDUCTION_IMPLEMENTATION_PLAN.md`).
 5. Flatten surviving cells into schema-ordered table rows.
 
 # Notes on Performance
@@ -200,8 +281,6 @@ function process_abstract_chunk_impl(
     # 3) Typed spatial metadata extraction (supports Dict or NamedTuple).
     dx_native = FT(_spatial_required(spatial_info, :dx_native))
     min_h_resolution = FT(_spatial_lookup(spatial_info, :min_h_resolution, 1000.0f0))
-    seeds_h = _spatial_lookup(spatial_info, :seeds_h, (1,))
-
     # 4) Canonical field dictionary consumed by coarsening kernels.
     fields = (
         hus = base_qt,
@@ -274,634 +353,18 @@ function process_abstract_chunk_impl(
             nz,
             FT,
         )
-    elseif coarsening_mode === :convolutional
-        if _DEPWARN_LEGACY_CONV[]
-            _DEPWARN_LEGACY_CONV[] = false
-            @warn "coarsening_mode=:convolutional (divisor enumeration from native) is deprecated; use :block, :sliding, or :hybrid (default)." maxlog = 1
-        end
-        return _process_abstract_chunk_legacy_divisor_convolutional(
-            fields,
-            product_pairs,
-            metadata,
-            spatial_info,
-            max_dz,
-            cloud_threshold,
-            domain_h,
-            dz_native,
-            nx,
-            ny,
-            nz,
-            FT,
-        )
-    elseif coarsening_mode !== :binary
-        throw(ArgumentError("Unknown coarsening_mode=$(repr(coarsening_mode)); use :hybrid, :block, :sliding, :binary (deprecated), or :convolutional (deprecated)."))
-    end
-
-    if _DEPWARN_BINARY[]
-        _DEPWARN_BINARY[] = false
-        @warn "coarsening_mode=:binary (seed ladder + vertical 2x) is deprecated; use :hybrid (default) or :block." maxlog = 1
-    end
-
-    z_schemes = CoarseGraining.compute_z_coarsening_scheme(dz_native, max_dz)
-    z_scheme_factors = Int[s[1] for s in z_schemes]
-
-    h_levels = build_horizontal_levels(
-        nx,
-        ny,
-        dx_native;
-        seeds=seeds_h,
-        min_h=min_h_resolution,
-        include_full_domain=false,
-    )
-
-    means_prev = nothing
-    prods_prev = nothing
-    prev_factor = 0
-
-    # Horizontal multiscale sweep.
-    for h_level in h_levels
-        factor = h_level.fx
-        current_resolution_h = FT(h_level.resolution_h)
-
-        # Reuse previous level outputs when possible instead of recoarsening
-        # directly from native fields each time.
-        means = if prev_factor == 0
-            coarsen_fields_at_level(fields, factor, factor)
-        else
-            ratio = div(factor, prev_factor)
-            coarsen_fields_at_level(means_prev, ratio, ratio)
-        end
-
-        prods = if prev_factor == 0
-            coarsen_products_at_level(fields, product_pairs, factor, factor)
-        else
-            ratio = div(factor, prev_factor)
-            coarsen_fields_at_level(prods_prev, ratio, ratio)
-        end
-
-        means_prev = means
-        prods_prev = prods
-        prev_factor = factor
-
-        c_qt = _field_get(means, :hus)
-        c_h = _field_get(means, :thetali)
-        c_ta = _field_get(means, :ta)
-        c_p = _field_get(means, :pfull)
-        c_rho = _field_get(means, :rhoa)
-        c_u = _field_get(means, :ua)
-        c_v = _field_get(means, :va)
-        c_w = _field_get(means, :wa)
-        c_ql = _field_get(means, :clw)
-        c_qi = _field_get(means, :cli)
-        c_liq_fraction = _field_get(means, :liq_fraction)
-        c_ice_fraction = _field_get(means, :ice_fraction)
-        c_cloud_fraction = _field_get(means, :cloud_fraction)
-
-        any_cloud = false
-        @inbounds for idx in eachindex(c_ql)
-            any_cloud |= (c_ql[idx] + c_qi[idx]) >= cloud_threshold
-        end
-        !any_cloud && break
-
-        c_prod_qt_qt = _field_get(prods, :qt_qt)
-        c_prod_ql_ql = _field_get(prods, :ql_ql)
-        c_prod_qi_qi = _field_get(prods, :qi_qi)
-        c_prod_u_u = _field_get(prods, :u_u)
-        c_prod_v_v = _field_get(prods, :v_v)
-        c_prod_w_w = _field_get(prods, :w_w)
-        c_prod_h_h = _field_get(prods, :h_h)
-        c_prod_qt_ql = _field_get(prods, :qt_ql)
-        c_prod_qt_qi = _field_get(prods, :qt_qi)
-        c_prod_qt_w = _field_get(prods, :qt_w)
-        c_prod_qt_h = _field_get(prods, :qt_h)
-        c_prod_ql_qi = _field_get(prods, :ql_qi)
-        c_prod_ql_w = _field_get(prods, :ql_w)
-        c_prod_ql_h = _field_get(prods, :ql_h)
-        c_prod_qi_w = _field_get(prods, :qi_w)
-        c_prod_qi_h = _field_get(prods, :qi_h)
-        c_prod_w_h = _field_get(prods, :w_h)
-
-        v_qt = c_qt
-        v_h = c_h
-        v_ta = c_ta
-        v_p = c_p
-        v_rho = c_rho
-        v_u = c_u
-        v_v = c_v
-        v_w = c_w
-        v_ql = c_ql
-        v_qi = c_qi
-        v_liq_fraction = c_liq_fraction
-        v_ice_fraction = c_ice_fraction
-        v_cloud_fraction = c_cloud_fraction
-
-        v_prod_qt_qt = c_prod_qt_qt
-        v_prod_ql_ql = c_prod_ql_ql
-        v_prod_qi_qi = c_prod_qi_qi
-        v_prod_u_u = c_prod_u_u
-        v_prod_v_v = c_prod_v_v
-        v_prod_w_w = c_prod_w_w
-        v_prod_h_h = c_prod_h_h
-        v_prod_qt_ql = c_prod_qt_ql
-        v_prod_qt_qi = c_prod_qt_qi
-        v_prod_qt_w = c_prod_qt_w
-        v_prod_qt_h = c_prod_qt_h
-        v_prod_ql_qi = c_prod_ql_qi
-        v_prod_ql_w = c_prod_ql_w
-        v_prod_ql_h = c_prod_ql_h
-        v_prod_qi_w = c_prod_qi_w
-        v_prod_qi_h = c_prod_qi_h
-        v_prod_w_h = c_prod_w_h
-        v_dz_profile = dz_native
-
-        # Reusable slabs (max size = first vertical stage at this horizontal level).
-        s_diag = size(c_ql)
-        diag_tke = Array{FT}(undef, s_diag)
-        diag_var_qt = Array{FT}(undef, s_diag)
-        diag_var_ql = Array{FT}(undef, s_diag)
-        diag_var_qi = Array{FT}(undef, s_diag)
-        diag_var_w = Array{FT}(undef, s_diag)
-        diag_var_h = Array{FT}(undef, s_diag)
-        diag_cov_qt_ql = Array{FT}(undef, s_diag)
-        diag_cov_qt_qi = Array{FT}(undef, s_diag)
-        diag_cov_qt_w = Array{FT}(undef, s_diag)
-        diag_cov_qt_h = Array{FT}(undef, s_diag)
-        diag_cov_ql_qi = Array{FT}(undef, s_diag)
-        diag_cov_ql_w = Array{FT}(undef, s_diag)
-        diag_cov_ql_h = Array{FT}(undef, s_diag)
-        diag_cov_qi_w = Array{FT}(undef, s_diag)
-        diag_cov_qi_h = Array{FT}(undef, s_diag)
-        diag_cov_w_h = Array{FT}(undef, s_diag)
-        combined_mask_buf = BitArray(undef, s_diag)
-
-        # Vertical multiscale sweep for the current horizontal level.
-        for (z_level_idx, (z_factor, _)) in enumerate(z_schemes)
-            nx_z, ny_z, nz_z = size(v_ql)
-            ir, jr, kr = Base.OneTo(nx_z), Base.OneTo(ny_z), Base.OneTo(nz_z)
-            tke = view(diag_tke, ir, jr, kr)
-            _tke_from_moments!(tke, v_prod_u_u, v_u, v_prod_v_v, v_v, v_prod_w_w, v_w)
-
-            var_qt = view(diag_var_qt, ir, jr, kr)
-            var_ql = view(diag_var_ql, ir, jr, kr)
-            var_qi = view(diag_var_qi, ir, jr, kr)
-            var_w = view(diag_var_w, ir, jr, kr)
-            var_h = view(diag_var_h, ir, jr, kr)
-            _covariance_from_moments!(var_qt, v_prod_qt_qt, v_qt, v_qt)
-            _covariance_from_moments!(var_ql, v_prod_ql_ql, v_ql, v_ql)
-            _covariance_from_moments!(var_qi, v_prod_qi_qi, v_qi, v_qi)
-            _covariance_from_moments!(var_w, v_prod_w_w, v_w, v_w)
-            _covariance_from_moments!(var_h, v_prod_h_h, v_h, v_h)
-
-            cov_qt_ql = view(diag_cov_qt_ql, ir, jr, kr)
-            cov_qt_qi = view(diag_cov_qt_qi, ir, jr, kr)
-            cov_qt_w = view(diag_cov_qt_w, ir, jr, kr)
-            cov_qt_h = view(diag_cov_qt_h, ir, jr, kr)
-            cov_ql_qi = view(diag_cov_ql_qi, ir, jr, kr)
-            cov_ql_w = view(diag_cov_ql_w, ir, jr, kr)
-            cov_ql_h = view(diag_cov_ql_h, ir, jr, kr)
-            cov_qi_w = view(diag_cov_qi_w, ir, jr, kr)
-            cov_qi_h = view(diag_cov_qi_h, ir, jr, kr)
-            cov_w_h = view(diag_cov_w_h, ir, jr, kr)
-            _covariance_from_moments!(cov_qt_ql, v_prod_qt_ql, v_qt, v_ql)
-            _covariance_from_moments!(cov_qt_qi, v_prod_qt_qi, v_qt, v_qi)
-            _covariance_from_moments!(cov_qt_w, v_prod_qt_w, v_qt, v_w)
-            _covariance_from_moments!(cov_qt_h, v_prod_qt_h, v_qt, v_h)
-            _covariance_from_moments!(cov_ql_qi, v_prod_ql_qi, v_ql, v_qi)
-            _covariance_from_moments!(cov_ql_w, v_prod_ql_w, v_ql, v_w)
-            _covariance_from_moments!(cov_ql_h, v_prod_ql_h, v_ql, v_h)
-            _covariance_from_moments!(cov_qi_w, v_prod_qi_w, v_qi, v_w)
-            _covariance_from_moments!(cov_qi_h, v_prod_qi_h, v_qi, v_h)
-            _covariance_from_moments!(cov_w_h, v_prod_w_h, v_w, v_h)
-
-            empty_z_levels = CoarseGraining.identify_empty_z_levels_from_ql_qi(v_ql, v_qi, cloud_threshold)
-            future_z_factors = @view z_scheme_factors[(z_level_idx + 1):end]
-            z_keep_mask = CoarseGraining.build_z_level_keep_mask(empty_z_levels, z_factor, future_z_factors)
-            any(z_keep_mask) || continue
-
-            # 7) Single fused drop mask (view into reusable BitArray buffer).
-            combined_mask = view(combined_mask_buf, ir, jr, kr)
-            @inbounds for k in 1:nz_z
-                z_drop_k = !z_keep_mask[k]
-                for j in 1:ny_z
-                    for i in 1:nx_z
-                        if z_drop_k
-                            combined_mask[i, j, k] = true
-                        elseif (v_ql[i, j, k] + v_qi[i, j, k]) < cloud_threshold
-                            combined_mask[i, j, k] = true
-                        else
-                            combined_mask[i, j, k] = !_all_finite_emitted_diagnostics(
-                                i,
-                                j,
-                                k,
-                                v_qt,
-                                v_h,
-                                v_ta,
-                                v_p,
-                                v_rho,
-                                v_w,
-                                v_ql,
-                                v_qi,
-                                v_liq_fraction,
-                                v_ice_fraction,
-                                v_cloud_fraction,
-                                tke,
-                                var_qt,
-                                var_ql,
-                                var_qi,
-                                var_w,
-                                var_h,
-                                cov_qt_ql,
-                                cov_qt_qi,
-                                cov_qt_w,
-                                cov_qt_h,
-                                cov_ql_qi,
-                                cov_ql_w,
-                                cov_ql_h,
-                                cov_qi_w,
-                                cov_qi_h,
-                                cov_w_h,
-                            )
-                        end
-                    end
-                end
-            end
-
-            # 8) Emit one table for this (h, z) level.
-            df_level = DataFrames.DataFrame()
-            DatasetBuilder.flatten_and_filter!(
-                df_level,
-                combined_mask,
-                v_qt,
-                v_h,
-                v_ta,
-                v_p,
-                v_rho,
-                v_w,
-                v_ql,
-                v_qi,
-                v_liq_fraction,
-                v_ice_fraction,
-                v_cloud_fraction,
-                tke,
-                var_qt,
-                var_ql,
-                var_qi,
-                var_w,
-                var_h,
-                cov_qt_ql,
-                cov_qt_qi,
-                cov_qt_w,
-                cov_qt_h,
-                cov_ql_qi,
-                cov_ql_w,
-                cov_ql_h,
-                cov_qi_w,
-                cov_qi_h,
-                cov_w_h,
-                v_dz_profile,
-                Float32(current_resolution_h),
-                domain_h,
-                metadata;
-                reduction_kind = "binary",
-                reduction_nh = factor,
-                reduction_fz = z_factor,
-                truncation_x = nx - factor * div(nx, factor),
-                truncation_y = ny - factor * div(ny, factor),
-                truncation_z = -1,
-            )
-            if DataFrames.nrow(df_level) > 0
-                if isnothing(out_acc)
-                    out_acc = df_level
-                else
-                    DataFrames.append!(out_acc, df_level)
-                end
-            end
-
-            # 9) Prepare next vertical level via 2x coarsening.
-            if z_level_idx == length(z_schemes) || size(v_qt, 3) < 2
-                continue
-            end
-
-            v_qt = coarsen3d_vertical_mean(v_qt, 2)
-            v_h = coarsen3d_vertical_mean(v_h, 2)
-            v_ta = coarsen3d_vertical_mean(v_ta, 2)
-            v_p = coarsen3d_vertical_mean(v_p, 2)
-            v_rho = coarsen3d_vertical_mean(v_rho, 2)
-            v_u = coarsen3d_vertical_mean(v_u, 2)
-            v_v = coarsen3d_vertical_mean(v_v, 2)
-            v_w = coarsen3d_vertical_mean(v_w, 2)
-            v_ql = coarsen3d_vertical_mean(v_ql, 2)
-            v_qi = coarsen3d_vertical_mean(v_qi, 2)
-            v_liq_fraction = coarsen3d_vertical_mean(v_liq_fraction, 2)
-            v_ice_fraction = coarsen3d_vertical_mean(v_ice_fraction, 2)
-            v_cloud_fraction = coarsen3d_vertical_mean(v_cloud_fraction, 2)
-
-            v_prod_qt_qt = coarsen3d_vertical_mean(v_prod_qt_qt, 2)
-            v_prod_ql_ql = coarsen3d_vertical_mean(v_prod_ql_ql, 2)
-            v_prod_qi_qi = coarsen3d_vertical_mean(v_prod_qi_qi, 2)
-            v_prod_u_u = coarsen3d_vertical_mean(v_prod_u_u, 2)
-            v_prod_v_v = coarsen3d_vertical_mean(v_prod_v_v, 2)
-            v_prod_w_w = coarsen3d_vertical_mean(v_prod_w_w, 2)
-            v_prod_h_h = coarsen3d_vertical_mean(v_prod_h_h, 2)
-            v_prod_qt_ql = coarsen3d_vertical_mean(v_prod_qt_ql, 2)
-            v_prod_qt_qi = coarsen3d_vertical_mean(v_prod_qt_qi, 2)
-            v_prod_qt_w = coarsen3d_vertical_mean(v_prod_qt_w, 2)
-            v_prod_qt_h = coarsen3d_vertical_mean(v_prod_qt_h, 2)
-            v_prod_ql_qi = coarsen3d_vertical_mean(v_prod_ql_qi, 2)
-            v_prod_ql_w = coarsen3d_vertical_mean(v_prod_ql_w, 2)
-            v_prod_ql_h = coarsen3d_vertical_mean(v_prod_ql_h, 2)
-            v_prod_qi_w = coarsen3d_vertical_mean(v_prod_qi_w, 2)
-            v_prod_qi_h = coarsen3d_vertical_mean(v_prod_qi_h, 2)
-            v_prod_w_h = coarsen3d_vertical_mean(v_prod_w_h, 2)
-
-            v_dz_profile = coarsen_dz_profile_2x_at_level(v_dz_profile)
-        end
-    end
-
-    isnothing(out_acc) && return DataFrames.DataFrame()
-    return out_acc
-end
-
-function _process_abstract_chunk_legacy_divisor_convolutional(
-    fields::NamedTuple,
-    product_pairs::NamedTuple,
-    metadata,
-    spatial_info,
-    max_dz::FT,
-    cloud_threshold::Float32,
-    domain_h::FT,
-    dz_native,
-    nx::Int,
-    ny::Int,
-    nz::Int,
-    ::Type{FT},
-) where {FT <: Real}
-    dx_native = FT(_spatial_required(spatial_info, :dx_native))
-    min_h_resolution = FT(_spatial_lookup(spatial_info, :min_h_resolution, 1000.0f0))
-    square_h = _spatial_lookup(spatial_info, :convolutional_square_horizontal, true)
-    explicit = _spatial_lookup(spatial_info, :convolutional_triples, nothing)
-
-    dz_ref = FT(sum(dz_native) / length(dz_native))
-
-    triples = if explicit === nothing
-        build_convolutional_coarsening_triples(
-            nx,
-            ny,
-            nz,
-            dx_native,
-            min_h_resolution,
-            dz_ref,
-            FT(max_dz);
-            square_horizontal = square_h,
+    elseif coarsening_mode in (:binary, :convolutional, :legacy_binary, :legacy_conv)
+        throw(
+            ArgumentError(
+                "coarsening_mode=$(repr(coarsening_mode)) was removed. Use :hybrid (default), :block, or :sliding. " *
+                "For a fixed list of 3D block factors use :block with :block_triples => [(fx,fy,fz), ...].",
+            ),
         )
     else
-        Vector{NTuple{3,Int}}(collect(explicit))
+        throw(ArgumentError("Unknown coarsening_mode=$(repr(coarsening_mode)); use :hybrid, :block, or :sliding."))
     end
-
-    future_z_empty = Int[]
-
-    out_acc = nothing
-    for (fx, fy, fz) in triples
-        means = coarsen_fields_3d_block(fields, fx, fy, fz)
-        prods = coarsen_products_3d_block(fields, product_pairs, fx, fy, fz)
-
-        c_qt = _field_get(means, :hus)
-        c_h = _field_get(means, :thetali)
-        c_ta = _field_get(means, :ta)
-        c_p = _field_get(means, :pfull)
-        c_rho = _field_get(means, :rhoa)
-        c_u = _field_get(means, :ua)
-        c_v = _field_get(means, :va)
-        c_w = _field_get(means, :wa)
-        c_ql = _field_get(means, :clw)
-        c_qi = _field_get(means, :cli)
-        c_liq_fraction = _field_get(means, :liq_fraction)
-        c_ice_fraction = _field_get(means, :ice_fraction)
-        c_cloud_fraction = _field_get(means, :cloud_fraction)
-
-        any_cloud = false
-        @inbounds for idx in eachindex(c_ql)
-            any_cloud |= (c_ql[idx] + c_qi[idx]) >= cloud_threshold
-        end
-        !any_cloud && continue
-
-        c_prod_qt_qt = _field_get(prods, :qt_qt)
-        c_prod_ql_ql = _field_get(prods, :ql_ql)
-        c_prod_qi_qi = _field_get(prods, :qi_qi)
-        c_prod_u_u = _field_get(prods, :u_u)
-        c_prod_v_v = _field_get(prods, :v_v)
-        c_prod_w_w = _field_get(prods, :w_w)
-        c_prod_h_h = _field_get(prods, :h_h)
-        c_prod_qt_ql = _field_get(prods, :qt_ql)
-        c_prod_qt_qi = _field_get(prods, :qt_qi)
-        c_prod_qt_w = _field_get(prods, :qt_w)
-        c_prod_qt_h = _field_get(prods, :qt_h)
-        c_prod_ql_qi = _field_get(prods, :ql_qi)
-        c_prod_ql_w = _field_get(prods, :ql_w)
-        c_prod_ql_h = _field_get(prods, :ql_h)
-        c_prod_qi_w = _field_get(prods, :qi_w)
-        c_prod_qi_h = _field_get(prods, :qi_h)
-        c_prod_w_h = _field_get(prods, :w_h)
-
-        v_qt = c_qt
-        v_h = c_h
-        v_ta = c_ta
-        v_p = c_p
-        v_rho = c_rho
-        v_u = c_u
-        v_v = c_v
-        v_w = c_w
-        v_ql = c_ql
-        v_qi = c_qi
-        v_liq_fraction = c_liq_fraction
-        v_ice_fraction = c_ice_fraction
-        v_cloud_fraction = c_cloud_fraction
-
-        v_prod_qt_qt = c_prod_qt_qt
-        v_prod_ql_ql = c_prod_ql_ql
-        v_prod_qi_qi = c_prod_qi_qi
-        v_prod_u_u = c_prod_u_u
-        v_prod_v_v = c_prod_v_v
-        v_prod_w_w = c_prod_w_w
-        v_prod_h_h = c_prod_h_h
-        v_prod_qt_ql = c_prod_qt_ql
-        v_prod_qt_qi = c_prod_qt_qi
-        v_prod_qt_w = c_prod_qt_w
-        v_prod_qt_h = c_prod_qt_h
-        v_prod_ql_qi = c_prod_ql_qi
-        v_prod_ql_w = c_prod_ql_w
-        v_prod_ql_h = c_prod_ql_h
-        v_prod_qi_w = c_prod_qi_w
-        v_prod_qi_h = c_prod_qi_h
-        v_prod_w_h = c_prod_w_h
-
-        v_dz_profile = coarsen_dz_profile_factor(dz_native, fz)
-        current_resolution_h = FT(max(fx, fy)) * dx_native
-
-        s_diag = size(c_ql)
-        diag_tke = Array{FT}(undef, s_diag)
-        diag_var_qt = Array{FT}(undef, s_diag)
-        diag_var_ql = Array{FT}(undef, s_diag)
-        diag_var_qi = Array{FT}(undef, s_diag)
-        diag_var_w = Array{FT}(undef, s_diag)
-        diag_var_h = Array{FT}(undef, s_diag)
-        diag_cov_qt_ql = Array{FT}(undef, s_diag)
-        diag_cov_qt_qi = Array{FT}(undef, s_diag)
-        diag_cov_qt_w = Array{FT}(undef, s_diag)
-        diag_cov_qt_h = Array{FT}(undef, s_diag)
-        diag_cov_ql_qi = Array{FT}(undef, s_diag)
-        diag_cov_ql_w = Array{FT}(undef, s_diag)
-        diag_cov_ql_h = Array{FT}(undef, s_diag)
-        diag_cov_qi_w = Array{FT}(undef, s_diag)
-        diag_cov_qi_h = Array{FT}(undef, s_diag)
-        diag_cov_w_h = Array{FT}(undef, s_diag)
-        combined_mask_buf = BitArray(undef, s_diag)
-
-        nx_z, ny_z, nz_z = size(v_ql)
-        ir, jr, kr = Base.OneTo(nx_z), Base.OneTo(ny_z), Base.OneTo(nz_z)
-        tke = view(diag_tke, ir, jr, kr)
-        _tke_from_moments!(tke, v_prod_u_u, v_u, v_prod_v_v, v_v, v_prod_w_w, v_w)
-
-        var_qt = view(diag_var_qt, ir, jr, kr)
-        var_ql = view(diag_var_ql, ir, jr, kr)
-        var_qi = view(diag_var_qi, ir, jr, kr)
-        var_w = view(diag_var_w, ir, jr, kr)
-        var_h = view(diag_var_h, ir, jr, kr)
-        _covariance_from_moments!(var_qt, v_prod_qt_qt, v_qt, v_qt)
-        _covariance_from_moments!(var_ql, v_prod_ql_ql, v_ql, v_ql)
-        _covariance_from_moments!(var_qi, v_prod_qi_qi, v_qi, v_qi)
-        _covariance_from_moments!(var_w, v_prod_w_w, v_w, v_w)
-        _covariance_from_moments!(var_h, v_prod_h_h, v_h, v_h)
-
-        cov_qt_ql = view(diag_cov_qt_ql, ir, jr, kr)
-        cov_qt_qi = view(diag_cov_qt_qi, ir, jr, kr)
-        cov_qt_w = view(diag_cov_qt_w, ir, jr, kr)
-        cov_qt_h = view(diag_cov_qt_h, ir, jr, kr)
-        cov_ql_qi = view(diag_cov_ql_qi, ir, jr, kr)
-        cov_ql_w = view(diag_cov_ql_w, ir, jr, kr)
-        cov_ql_h = view(diag_cov_ql_h, ir, jr, kr)
-        cov_qi_w = view(diag_cov_qi_w, ir, jr, kr)
-        cov_qi_h = view(diag_cov_qi_h, ir, jr, kr)
-        cov_w_h = view(diag_cov_w_h, ir, jr, kr)
-        _covariance_from_moments!(cov_qt_ql, v_prod_qt_ql, v_qt, v_ql)
-        _covariance_from_moments!(cov_qt_qi, v_prod_qt_qi, v_qt, v_qi)
-        _covariance_from_moments!(cov_qt_w, v_prod_qt_w, v_qt, v_w)
-        _covariance_from_moments!(cov_qt_h, v_prod_qt_h, v_qt, v_h)
-        _covariance_from_moments!(cov_ql_qi, v_prod_ql_qi, v_ql, v_qi)
-        _covariance_from_moments!(cov_ql_w, v_prod_ql_w, v_ql, v_w)
-        _covariance_from_moments!(cov_ql_h, v_prod_ql_h, v_ql, v_h)
-        _covariance_from_moments!(cov_qi_w, v_prod_qi_w, v_qi, v_w)
-        _covariance_from_moments!(cov_qi_h, v_prod_qi_h, v_qi, v_h)
-        _covariance_from_moments!(cov_w_h, v_prod_w_h, v_w, v_h)
-
-        empty_z_levels = CoarseGraining.identify_empty_z_levels_from_ql_qi(v_ql, v_qi, cloud_threshold)
-        z_keep_mask = CoarseGraining.build_z_level_keep_mask(empty_z_levels, fz, future_z_empty)
-        any(z_keep_mask) || continue
-
-        combined_mask = view(combined_mask_buf, ir, jr, kr)
-        @inbounds for k in 1:nz_z
-            z_drop_k = !z_keep_mask[k]
-            for j in 1:ny_z
-                for i in 1:nx_z
-                    if z_drop_k
-                        combined_mask[i, j, k] = true
-                    elseif (v_ql[i, j, k] + v_qi[i, j, k]) < cloud_threshold
-                        combined_mask[i, j, k] = true
-                    else
-                        combined_mask[i, j, k] = !_all_finite_emitted_diagnostics(
-                            i,
-                            j,
-                            k,
-                            v_qt,
-                            v_h,
-                            v_ta,
-                            v_p,
-                            v_rho,
-                            v_w,
-                            v_ql,
-                            v_qi,
-                            v_liq_fraction,
-                            v_ice_fraction,
-                            v_cloud_fraction,
-                            tke,
-                            var_qt,
-                            var_ql,
-                            var_qi,
-                            var_w,
-                            var_h,
-                            cov_qt_ql,
-                            cov_qt_qi,
-                            cov_qt_w,
-                            cov_qt_h,
-                            cov_ql_qi,
-                            cov_ql_w,
-                            cov_ql_h,
-                            cov_qi_w,
-                            cov_qi_h,
-                            cov_w_h,
-                        )
-                    end
-                end
-            end
-        end
-
-        df_level = DataFrames.DataFrame()
-        tx, _ = truncated_block_extent(nx, fx)
-        ty, _ = truncated_block_extent(ny, fy)
-        tz_disc = nz - fz * div(nz, fz)
-        DatasetBuilder.flatten_and_filter!(
-            df_level,
-            combined_mask,
-            v_qt,
-            v_h,
-            v_ta,
-            v_p,
-            v_rho,
-            v_w,
-            v_ql,
-            v_qi,
-            v_liq_fraction,
-            v_ice_fraction,
-            v_cloud_fraction,
-            tke,
-            var_qt,
-            var_ql,
-            var_qi,
-            var_w,
-            var_h,
-            cov_qt_ql,
-            cov_qt_qi,
-            cov_qt_w,
-            cov_qt_h,
-            cov_ql_qi,
-            cov_ql_w,
-            cov_ql_h,
-            cov_qi_w,
-            cov_qi_h,
-            cov_w_h,
-            v_dz_profile,
-            Float32(current_resolution_h),
-            domain_h,
-            metadata;
-            reduction_kind = "legacy_divisor_convolutional",
-            reduction_nh = fx,
-            reduction_fz = fz,
-            truncation_x = nx - tx,
-            truncation_y = ny - ty,
-            truncation_z = tz_disc,
-        )
-        if DataFrames.nrow(df_level) > 0
-            if isnothing(out_acc)
-                out_acc = df_level
-            else
-                DataFrames.append!(out_acc, df_level)
-            end
-        end
-    end
-
-    isnothing(out_acc) && return DataFrames.DataFrame()
-    return out_acc
 end
+
 
 function _process_abstract_chunk_block_truncated(
     fields::NamedTuple,
@@ -919,19 +382,24 @@ function _process_abstract_chunk_block_truncated(
 ) where {FT <: Real}
     dx_native = FT(_spatial_required(spatial_info, :dx_native))
     min_h_resolution = FT(_spatial_lookup(spatial_info, :min_h_resolution, 1000.0f0))
-    square_h = _spatial_lookup(spatial_info, :convolutional_square_horizontal, true)
-    square_h || throw(ArgumentError("block_truncated coarsening currently requires convolutional_square_horizontal=true"))
+    square_h = _spatial_lookup(spatial_info, :block_square_horizontal, _spatial_lookup(spatial_info, :convolutional_square_horizontal, true))
+    square_h || throw(ArgumentError("block_truncated coarsening currently requires block_square_horizontal=true (legacy key convolutional_square_horizontal is still accepted)"))
     dz_ref = FT(sum(dz_native) / length(dz_native))
-    triples = block_reduction_triples(
-        nx,
-        ny,
-        nz,
-        dx_native,
-        min_h_resolution,
-        dz_ref,
-        FT(max_dz);
-        square_horizontal = true,
-    )
+    explicit_block = _spatial_lookup(spatial_info, :block_triples, nothing)
+    triples = if explicit_block === nothing
+        block_reduction_triples(
+            nx,
+            ny,
+            nz,
+            dx_native,
+            min_h_resolution,
+            dz_ref,
+            FT(max_dz);
+            square_horizontal = true,
+        )
+    else
+        Vector{NTuple{3,Int}}(collect(explicit_block))
+    end
     future_z_empty = Int[]
     out_acc = nothing
     for (fx, fy, fz) in triples
@@ -1178,11 +646,12 @@ function _process_abstract_chunk_sliding(
 ) where {FT <: Real}
     dx_native = FT(_spatial_required(spatial_info, :dx_native))
     min_h_resolution = FT(_spatial_lookup(spatial_info, :min_h_resolution, 1000.0f0))
-    stride_h = Int(_spatial_lookup(spatial_info, :sliding_stride_h, 1))
-    stride_v = Int(_spatial_lookup(spatial_info, :sliding_stride_v, 1))
-    stride_z = Int(_spatial_lookup(spatial_info, :sliding_stride_z, 1))
+    kh = Int(_spatial_lookup(spatial_info, :sliding_outputs_h, 2))
+    kv = Int(_spatial_lookup(spatial_info, :sliding_outputs_v, 2))
+    kz = Int(_spatial_lookup(spatial_info, :sliding_outputs_z, 2))
+    win_budget = Int(_spatial_lookup(spatial_info, :sliding_window_budget_h, 5))
     dz_ref = FT(sum(dz_native) / length(dz_native))
-    triples = block_reduction_triples(
+    triples = sliding_reduction_triples(
         nx,
         ny,
         nz,
@@ -1190,13 +659,25 @@ function _process_abstract_chunk_sliding(
         min_h_resolution,
         dz_ref,
         FT(max_dz);
+        horizontal_budget = win_budget,
         square_horizontal = true,
     )
     future_z_empty = Int[]
     out_acc = nothing
     for (wh, _wh, wz) in triples
-        means = coarsen_fields_valid_box(fields, wh, wh, wz; stride_h, stride_v, stride_z)
-        prods = coarsen_products_valid_box(fields, product_pairs, wh, wh, wz; stride_h, stride_v, stride_z)
+        means, prods, trunc_x, trunc_y, trunc_z = _coarsen_sliding_valid_box(
+            fields,
+            product_pairs,
+            spatial_info,
+            nx,
+            ny,
+            nz,
+            wh,
+            wz,
+            kh,
+            kv,
+            kz,
+        )
         c_qt = _field_get(means, :hus)
         c_h = _field_get(means, :thetali)
         c_ta = _field_get(means, :ta)
@@ -1365,12 +846,6 @@ function _process_abstract_chunk_sliding(
                 end
             end
         end
-        nx_out = size(c_ql, 1)
-        ny_out = size(c_ql, 2)
-        nz_out = size(c_ql, 3)
-        trunc_x = nx - (stride_h * (nx_out - 1) + wh)
-        trunc_y = ny - (stride_v * (ny_out - 1) + wh)
-        trunc_z = nz - (stride_z * (nz_out - 1) + wz)
         df_level = DataFrames.DataFrame()
         DatasetBuilder.flatten_and_filter!(
             df_level,
@@ -1455,14 +930,36 @@ function _process_abstract_chunk_hybrid(
     )
     dx_native = FT(_spatial_required(spatial_info, :dx_native))
     min_h_resolution = FT(_spatial_lookup(spatial_info, :min_h_resolution, 1000.0f0))
+    kh = Int(_spatial_lookup(spatial_info, :sliding_outputs_h, 2))
+    kv = Int(_spatial_lookup(spatial_info, :sliding_outputs_v, 2))
+    kz_out = Int(_spatial_lookup(spatial_info, :sliding_outputs_z, 2))
+    win_budget = Int(_spatial_lookup(spatial_info, :sliding_window_budget_h, 5))
     extra = _spatial_lookup(spatial_info, :hybrid_sliding_extra_sizes, nothing)
+    dz_ref = FT(sum(dz_native) / length(dz_native))
+    triples_block = block_reduction_triples(
+        nx,
+        ny,
+        nz,
+        dx_native,
+        min_h_resolution,
+        dz_ref,
+        FT(max_dz);
+        square_horizontal = true,
+    )
+    block_nhs = Set{Int}(t[1] for t in triples_block)
     win_extra = if extra === nothing
-        default_hybrid_sliding_windows(nx, ny, dx_native, min_h_resolution)
+        hybrid_sliding_extra_sizes_default(
+            nx,
+            ny,
+            dx_native,
+            min_h_resolution,
+            block_nhs;
+            budget = win_budget,
+        )
     else
         Vector{Int}(collect(extra))
     end
     isempty(win_extra) && return df_b
-    dz_ref = FT(sum(dz_native) / length(dz_native))
     z_factors = Int[]
     for fz in 1:nz
         mod(nz, fz) != 0 && continue
@@ -1471,13 +968,21 @@ function _process_abstract_chunk_hybrid(
     end
     future_z_empty = Int[]
     out_acc = DataFrames.nrow(df_b) > 0 ? df_b : nothing
-    stride_h = Int(_spatial_lookup(spatial_info, :sliding_stride_h, 1))
-    stride_v = Int(_spatial_lookup(spatial_info, :sliding_stride_v, 1))
-    stride_z = Int(_spatial_lookup(spatial_info, :sliding_stride_z, 1))
     for wh in win_extra
         for wz in z_factors
-            means = coarsen_fields_valid_box(fields, wh, wh, wz; stride_h, stride_v, stride_z)
-            prods = coarsen_products_valid_box(fields, product_pairs, wh, wh, wz; stride_h, stride_v, stride_z)
+            means, prods, trunc_x, trunc_y, trunc_z = _coarsen_sliding_valid_box(
+                fields,
+                product_pairs,
+                spatial_info,
+                nx,
+                ny,
+                nz,
+                wh,
+                wz,
+                kh,
+                kv,
+                kz_out,
+            )
             c_ql = _field_get(means, :clw)
             any_cloud = false
             @inbounds for idx in eachindex(c_ql)
@@ -1646,12 +1151,6 @@ function _process_abstract_chunk_hybrid(
                     end
                 end
             end
-            nx_out = size(c_ql, 1)
-            ny_out = size(c_ql, 2)
-            nz_out = size(c_ql, 3)
-            trunc_x = nx - (stride_h * (nx_out - 1) + wh)
-            trunc_y = ny - (stride_v * (ny_out - 1) + wh)
-            trunc_z = nz - (stride_z * (nz_out - 1) + wz)
             df_level = DataFrames.DataFrame()
             DatasetBuilder.flatten_and_filter!(
                 df_level,

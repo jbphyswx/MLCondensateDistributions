@@ -19,6 +19,12 @@ export seed_factor_ladder,
     conv3d_valid_box_product_mean,
     conv3d_valid_box_product_mean!,
     valid_box_output_extent,
+    uniform_stride_for_valid_box,
+    valid_box_anchor_starts,
+    conv3d_valid_box_mean_at_starts,
+    conv3d_valid_box_mean_at_starts!,
+    conv3d_valid_box_product_mean_at_starts,
+    conv3d_valid_box_product_mean_at_starts!,
     coarsen_fields_horizontal,
     coarsen_fields_vertical,
     coarsen_dz_profile_2x,
@@ -400,6 +406,179 @@ function valid_box_output_extent(n::Int, window::Int, stride::Int)
     window >= 1 && stride >= 1 || throw(ArgumentError("window and stride must be >= 1"))
     n < window && return 0
     return div(n - window, stride) + 1
+end
+
+"""
+    uniform_stride_for_valid_box(n, window, k_outputs) -> Int
+
+**Uniform stride only** (used when `sliding_stride_*` is set in `spatial_info`, or for
+experiments). Chooses one integer `stride` so `valid_box_output_extent(n, window, stride) ≤ k_outputs`,
+maximizing the number of outputs under that cap and minimizing `|stride - ideal|` for
+`ideal = (n-window)/(k_outputs-1)`.
+
+This does **not** guarantee the last window is flush to the far edge when
+`(n - window) % (k_outputs - 1) ≠ 0`. For **exactly** `k` placements with first start at
+`1` and last start at `n - window + 1`, use [`valid_box_anchor_starts`](@ref) and the
+`*_at_starts` convolutions (default sliding path when strides are not explicit).
+"""
+function uniform_stride_for_valid_box(n::Int, window::Int, k_outputs::Int)
+    window >= 1 && k_outputs >= 1 || throw(ArgumentError("window and k_outputs must be >= 1"))
+    n < window && return 1
+    span = n - window
+    if k_outputs == 1
+        return max(1, span + 1)
+    end
+    ideal = span / (k_outputs - 1)
+    best_s = 1
+    best_out = -1
+    best_dist = Inf
+    for s in 1:max(1, span)
+        out = div(span, s) + 1
+        out > k_outputs && continue
+        dist = abs(s - ideal)
+        if out > best_out ||
+            (out == best_out && dist < best_dist) ||
+            (out == best_out && dist == best_dist && s < best_s)
+            best_out = out
+            best_dist = dist
+            best_s = s
+        end
+    end
+    best_out == -1 && return max(1, span)
+    return best_s
+end
+
+"""
+    valid_box_anchor_starts(n, window, k) -> Vector{Int}
+
+`k` valid 1-based window **origin** indices along one axis, **including** `1` and
+`n - window + 1`, with interior origins spaced by integer division. The returned length is
+`min(k, L)` where `L = n - window + 1` is the count of distinct valid starts (so a single
+full-domain window yields one anchor even if `k > 1`).
+
+Example: `n=10`, `window=3` ⇒ last start `8`; `k=3` ⇒ `[1, 4, 8]` (not uniform stride).
+"""
+function valid_box_anchor_starts(n::Int, window::Int, k::Int)::Vector{Int}
+    window >= 1 || throw(ArgumentError("window must be >= 1"))
+    k >= 1 || throw(ArgumentError("k must be >= 1"))
+    n < window && throw(DimensionMismatch("window exceeds n"))
+    L = n - window + 1
+    k_eff = min(k, L)
+    k_eff == 1 && return Int[1]
+    return Int[1 + div((i - 1) * (L - 1), k_eff - 1) for i in 1:k_eff]
+end
+
+function conv3d_valid_box_mean_at_starts!(
+    out::AbstractArray{T, 3},
+    data::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int,
+    ix::AbstractVector{Int},
+    iy::AbstractVector{Int},
+    iz::AbstractVector{Int},
+) where {T <: Real}
+    wx >= 1 && wy >= 1 && wz >= 1 || throw(ArgumentError("window sizes must be >= 1"))
+    nx, ny, nz = size(data)
+    nxo, nyo, nzo = length(ix), length(iy), length(iz)
+    size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch for conv3d_valid_box_mean_at_starts"))
+    inv_vol = one(T) / T(wx * wy * wz)
+    @inbounds for koz in 1:nzo
+        k0 = iz[koz]
+        (k0 >= 1 && k0 + wz - 1 <= nz) || throw(DimensionMismatch("z anchor out of bounds"))
+        for joz in 1:nyo
+            j0 = iy[joz]
+            (j0 >= 1 && j0 + wy - 1 <= ny) || throw(DimensionMismatch("y anchor out of bounds"))
+            for ioz in 1:nxo
+                i0 = ix[ioz]
+                (i0 >= 1 && i0 + wx - 1 <= nx) || throw(DimensionMismatch("x anchor out of bounds"))
+                acc = zero(T)
+                for kk in 0:(wz - 1)
+                    z = k0 + kk
+                    for jj in 0:(wy - 1)
+                        y = j0 + jj
+                        for ii in 0:(wx - 1)
+                            x = i0 + ii
+                            acc += data[x, y, z]
+                        end
+                    end
+                end
+                out[ioz, joz, koz] = acc * inv_vol
+            end
+        end
+    end
+    return out
+end
+
+function conv3d_valid_box_mean_at_starts(
+    data::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int,
+    ix::AbstractVector{Int},
+    iy::AbstractVector{Int},
+    iz::AbstractVector{Int},
+) where {T <: Real}
+    out = similar(data, length(ix), length(iy), length(iz))
+    return conv3d_valid_box_mean_at_starts!(out, data, wx, wy, wz, ix, iy, iz)
+end
+
+function conv3d_valid_box_product_mean_at_starts!(
+    out::AbstractArray{T, 3},
+    x::AbstractArray{T, 3},
+    y::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int,
+    ix::AbstractVector{Int},
+    iy::AbstractVector{Int},
+    iz::AbstractVector{Int},
+) where {T <: Real}
+    size(x) == size(y) || throw(DimensionMismatch("x and y must match shape"))
+    wx >= 1 && wy >= 1 && wz >= 1 || throw(ArgumentError("window sizes must be >= 1"))
+    nx, ny, nz = size(x)
+    nxo, nyo, nzo = length(ix), length(iy), length(iz)
+    size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch"))
+    inv_vol = one(T) / T(wx * wy * wz)
+    @inbounds for koz in 1:nzo
+        k0 = iz[koz]
+        (k0 >= 1 && k0 + wz - 1 <= nz) || throw(DimensionMismatch("z anchor out of bounds"))
+        for joz in 1:nyo
+            j0 = iy[joz]
+            (j0 >= 1 && j0 + wy - 1 <= ny) || throw(DimensionMismatch("y anchor out of bounds"))
+            for ioz in 1:nxo
+                i0 = ix[ioz]
+                (i0 >= 1 && i0 + wx - 1 <= nx) || throw(DimensionMismatch("x anchor out of bounds"))
+                acc = zero(T)
+                for kk in 0:(wz - 1)
+                    z = k0 + kk
+                    for jj in 0:(wy - 1)
+                        yy = j0 + jj
+                        for ii in 0:(wx - 1)
+                            xi = i0 + ii
+                            acc += x[xi, yy, z] * y[xi, yy, z]
+                        end
+                    end
+                end
+                out[ioz, joz, koz] = acc * inv_vol
+            end
+        end
+    end
+    return out
+end
+
+function conv3d_valid_box_product_mean_at_starts(
+    x::AbstractArray{T, 3},
+    y::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int,
+    ix::AbstractVector{Int},
+    iy::AbstractVector{Int},
+    iz::AbstractVector{Int},
+) where {T <: Real}
+    out = similar(x, length(ix), length(iy), length(iz))
+    return conv3d_valid_box_product_mean_at_starts!(out, x, y, wx, wy, wz, ix, iy, iz)
 end
 
 """

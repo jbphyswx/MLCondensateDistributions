@@ -37,7 +37,7 @@ Test.@testset "DatasetBuilderImpl parity and allocation guard" begin
         :domain_h => Float32((nx - 1) * 50),
         :min_h_resolution => Float32(1000),
         :dz_native_profile => fill(Float32(20), nz),
-        :coarsening_mode => :binary,
+        :coarsening_mode => :hybrid,
     )
 
     # Warmup
@@ -56,7 +56,7 @@ Test.@testset "DatasetBuilderImpl parity and allocation guard" begin
     Test.@test alloc_new < 5 * alloc_old
 end
 
-Test.@testset "DatasetBuilderImpl convolutional coarsening (explicit triple)" begin
+Test.@testset "DatasetBuilderImpl block_truncated with explicit block_triples" begin
     nx, ny, nz = 4, 4, 4
     fine_fields = Dict{String, Array{Float32, 3}}(
         "hus" => fill(Float32(1e-2), nx, ny, nz),
@@ -85,8 +85,8 @@ Test.@testset "DatasetBuilderImpl convolutional coarsening (explicit triple)" be
         :domain_h => Float32(nx - 1),
         :min_h_resolution => 0.0f0,
         :dz_native_profile => fill(Float32(1), nz),
-        :coarsening_mode => :convolutional,
-        :convolutional_triples => Tuple{Int,Int,Int}[(2, 2, 2)],
+        :coarsening_mode => :block,
+        :block_triples => Tuple{Int,Int,Int}[(2, 2, 2)],
     )
 
     df = DatasetBuilderImpl.process_abstract_chunk_impl(fine_fields, metadata, spatial_conv)

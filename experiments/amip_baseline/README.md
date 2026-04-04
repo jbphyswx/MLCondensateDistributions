@@ -128,6 +128,8 @@ Useful environment variables:
 - `PAUSE_BETWEEN_BATCHES=true|false`
 - `FORCE_REPROCESS=true|false`
 - `MAX_TIMESTEPS=0` for full-case scans
+- `MLCD_COARSENING_MODE=hybrid|block|sliding` (default `hybrid` if unset). Legacy values `binary`, `convolutional`, `conv`, etc. are accepted with a **one-time warning** and treated as `hybrid`; unset any old `export MLCD_COARSENING_MODE=convolutional` in your shell init once you see the warning.
+- `MLCD_SLIDING_OUTPUTS_H`, `MLCD_SLIDING_OUTPUTS_V`, `MLCD_SLIDING_OUTPUTS_Z` (default `2` each), `MLCD_SLIDING_WINDOW_BUDGET_H` — see `tabular_build_options_from_env` in `utils/build_training_common.jl`.
 
 ## Script Inventory
 

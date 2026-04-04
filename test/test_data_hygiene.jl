@@ -38,7 +38,7 @@ Test.@testset "Dataset builder drops non-finite cells" begin
         :domain_h => 800.0f0,
         :min_h_resolution => 100.0f0,
         :dz_native_profile => fill(50.0f0, dims[3]),
-        :coarsening_mode => :binary,
+        :coarsening_mode => :hybrid,
     )
 
     df = DatasetBuilder.process_abstract_chunk(fine_fields, metadata, spatial_info)
