@@ -3,7 +3,7 @@ module CoarseGraining
 using Statistics: Statistics
 
 export cg_2x2_horizontal, cg_2x_vertical, cg_horizontal_factor, cg_horizontal_product_factor, compute_covariance,
-    compute_z_coarsening_scheme, identify_empty_z_levels, build_z_level_keep_mask, apply_z_level_mask_to_field, build_z_profile_after_mask
+    compute_z_coarsening_scheme, identify_empty_z_levels, identify_empty_z_levels_from_ql_qi, build_z_level_keep_mask, apply_z_level_mask_to_field, build_z_profile_after_mask
 
 """
     cg_2x2_horizontal(field::AbstractArray{T, 3}) where T
@@ -231,7 +231,33 @@ function identify_empty_z_levels(q_c_3d::AbstractArray{<:Real, 3}, threshold::Fl
 end
 
 """
-    build_z_level_keep_mask(empty_z_levels::BitVector, z_factor::Int, future_z_factors::Vector{Int})
+    identify_empty_z_levels_from_ql_qi(ql, qi, threshold)
+
+Same semantics as [`identify_empty_z_levels`](@ref) on `ql .+ qi`, but **without** allocating
+the sum array (uses `max(ql+qi)` over each `(x,y)` plane per `k`).
+"""
+function identify_empty_z_levels_from_ql_qi(
+    ql::AbstractArray{<:Real, 3},
+    qi::AbstractArray{<:Real, 3},
+    threshold::Float32 = 1f-10,
+)
+    nx, ny, nz = size(ql)
+    size(qi) == (nx, ny, nz) || throw(DimensionMismatch("ql and qi must match shape"))
+    empty_mask = BitVector(undef, nz)
+    @inbounds for k in 1:nz
+        max_q = zero(Float32)
+        for j in 1:ny
+            for i in 1:nx
+                max_q = max(max_q, Float32(ql[i, j, k]) + Float32(qi[i, j, k]))
+            end
+        end
+        empty_mask[k] = max_q <= threshold
+    end
+    return empty_mask
+end
+
+"""
+    build_z_level_keep_mask(empty_z_levels::BitVector, z_factor::Int, future_z_factors::AbstractVector{Int})
 
 Builds a conservative BitVector indicating which z-levels to keep, ensuring that
 no dropped data would be used in future coarsenings.
@@ -243,7 +269,11 @@ no dropped data would be used in future coarsenings.
 
 **Critical**: Failure to respect this can cause statistical skew. Use extensive testing.
 """
-function build_z_level_keep_mask(empty_z_levels::BitVector, z_factor::Int, future_z_factors::Vector{Int})
+function build_z_level_keep_mask(
+    empty_z_levels::BitVector,
+    z_factor::Int,
+    future_z_factors::AbstractVector{Int},
+)
     nz = length(empty_z_levels)
     
     # Conservative strategy: for each potential pair/group, only drop if:
@@ -251,7 +281,7 @@ function build_z_level_keep_mask(empty_z_levels::BitVector, z_factor::Int, futur
     # - AND dropping won't affect future coarsenings
     
     # If this is the coarsest resolution we care about, we can be aggressive
-    is_coarsest = isempty(future_z_factors) || maximum(future_z_factors) <= z_factor
+    is_coarsest = isempty(future_z_factors) || Statistics.maximum(future_z_factors) <= z_factor
     
     keep_mask = trues(nz)
     

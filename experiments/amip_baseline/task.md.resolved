@@ -1,0 +1,43 @@
+# TKE Remediation Task List (Resolved)
+
+Status legend: `todo`, `in_progress`, `done`, `blocked`
+
+## Epic A: Definition and API
+- [x] (done) A1. Freeze canonical TKE definition at coarse scale (variance-based; no native LES `tke` field available).
+- [x] (done) A2. Align `dynamics.jl` public API (single naming convention, unambiguous inputs).
+- [x] (done) A3. Document units and expected input semantics in docstrings.
+
+## Epic B: Correctness Tests
+- [x] (done) B1. Add nonnegative TKE invariant test in dataset builder pipeline.
+- [x] (done) B2. Add synthetic variance test with known analytic expected TKE.
+- [x] (done) B3. Add regression test for signed-velocity-cancellation bug pattern.
+- [x] (done) B4. Add/retain identity tests (`q_con = q_liq + q_ice`, finite outputs).
+
+## Epic C: Allocation/Performance
+- [ ] (todo) C1. Baseline allocation profile for `process_abstract_chunk`.
+- [ ] (todo) C2. Identify top allocators (`c_prod_u_u`, `c_prod_v_v`, temporary dict/materialization).
+- [ ] (todo) C3. Implement buffer reuse only where correctness is preserved.
+- [ ] (todo) C4. Re-run profile and compare before/after metrics.
+
+## Epic D: Schema and Data Migration
+- [x] (done) D1. Add QA temperature observability field (`ta` or approved equivalent).
+- [x] (done) D2. Add schema/version marker for migration safety.
+- [x] (done) D3. Regenerate historical Arrow files.
+- [x] (done) D4. Run full-directory validator (finite/schema/TKE/identity checks).
+
+## Epic E: Workflow Status Model
+- [ ] (todo) E1. Define per-case processed status artifact format.
+- [ ] (todo) E2. Implement status writer in generation workflow.
+- [ ] (todo) E3. Keep workflow cache as index-only or deprecate after approval.
+
+## Verification Commands (to run after implementation)
+- [x] (done) V1. Package tests.
+- [x] (done) V2. Single-case generation smoke test + TKE range sanity.
+- [x] (done) V3. Processed-directory validator pass.
+- [ ] (todo) V4. 1-epoch training finite-loss smoke run.
+
+## Exit Criteria
+- [ ] (todo) All TKE correctness tests pass.
+- [ ] (todo) No negative TKE in processed data (beyond tiny numeric tolerance).
+- [ ] (todo) All processed files pass validator.
+- [ ] (todo) Plan decisions approved and documented.

@@ -3,6 +3,38 @@ using Arrow: Arrow
 using HTTP: HTTP
 using DimensionalData: DimensionalData
 
+"""Cumulative timings for cloudy timesteps only (non-`q_c` load + tabular path)."""
+mutable struct _GoogleLESProfAcc
+    n::Int
+    qc_s::Float64
+    prep_s::Float64
+    nonqc_s::Float64
+    tabular_s::Float64
+end
+
+_GoogleLESProfAcc() = _GoogleLESProfAcc(0, 0.0, 0.0, 0.0, 0.0)
+
+function _googleles_prof_add!(a::_GoogleLESProfAcc, qc, prep, nonqc, tabular)
+    a.n += 1
+    a.qc_s += qc
+    a.prep_s += prep
+    a.nonqc_s += nonqc
+    a.tabular_s += tabular
+    return nothing
+end
+
+function _googleles_prof_fmt_avg(a::_GoogleLESProfAcc)
+    a.n == 0 && return "no cloudy timesteps profiled yet"
+    n = a.n
+    return string(
+        "n_cloudy=$(n) avg_s: qc=$(round(a.qc_s / n; digits=3)) ",
+        "prep=$(round(a.prep_s / n; digits=3)) ",
+        "nonqc_zarr=$(round(a.nonqc_s / n; digits=3)) ",
+        "tabular=$(round(a.tabular_s / n; digits=3)) ",
+        "sum=$(round((a.qc_s + a.prep_s + a.nonqc_s + a.tabular_s) / n; digits=3))",
+    )
+end
+
 function _googleles_tabular_one_span!(
     z_range::UnitRange{Int},
     q_c_buf,
@@ -16,7 +48,7 @@ function _googleles_tabular_one_span!(
     site_id::Int,
     month::Int,
     experiment::String,
-    case_tables::Vector{DataFrames.DataFrame},
+    case_df_acc::Base.RefValue{Union{Nothing, DataFrames.DataFrame}},
     t_idx::Int,
 )::Nothing
     q_c_span = @view q_c_buf[:, :, z_range]
@@ -37,8 +69,15 @@ function _googleles_tabular_one_span!(
     spatial_info_t = (; spatial_info..., dz_native_profile = @view spatial_info.dz_native_profile[z_range])
     df = DatasetBuilder.process_abstract_chunk(fine_fields, metadata_t, spatial_info_t)
     if DataFrames.nrow(df) > 0
-        _assert_finite_dataframe(df, "GoogleLES site=$(site_id) month=$(month) experiment=$(experiment) timestep=$(t_idx)")
-        push!(case_tables, df)
+        if !_parse_bool_env("MLCD_SKIP_FINITE_ASSERT_PER_CHUNK", false)
+            _assert_finite_dataframe(df, "GoogleLES site=$(site_id) month=$(month) experiment=$(experiment) timestep=$(t_idx)")
+        end
+        acc = case_df_acc[]
+        if isnothing(acc)
+            case_df_acc[] = df
+        else
+            DataFrames.append!(acc, df)
+        end
     end
     return nothing
 end
@@ -113,6 +152,9 @@ Returns nothing; output is file-based.
 - Native `z_keep_mask` uses the same future vertical factors as the builder, so requested z-indices match reduction needs; levels that stay `false` are never fetched for non-`q_c` variables.
 - `copyto!` after each span read keeps compute off lazy Zarr; a reused `scratch` dict avoids per-span `Dict` allocation.
 - Preallocated 3D buffers are reused across timesteps and spans.
+- `MLCD_SKIP_FINITE_ASSERT_PER_CHUNK=1`: skip `_assert_finite_dataframe` on each span/timestep chunk (final case-level check still runs).
+- **`MLCD_GOOGLELES_TIMESTEP_PROFILE=1`**: for each **cloudy** timestep (after cloud + z-keep checks), record seconds for: **`qc`** (`q_c` slab copy from cache), **`prep`** (masks + span grouping), **`nonqc_zarr`** (`_materialize_*` / `_load_googleles_timestep_fields_into_span_list!`), **`tabular`** (`_googleles_tabular_one_span!` including `process_abstract_chunk`). Prints a running **average over cloudy timesteps** on the same cadence as progress (every 8 processed steps) and a **summary** after timestep processing; **`Arrow.write`** time once at the end.
+- **`MLCD_GOOGLELES_TIMESTEP_PROFILE_EACH=1`**: with profile enabled, also `println` one line **per cloudy timestep** (verbose).
 
 # Error Handling
 
@@ -191,11 +233,14 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
         @info "GoogleLES Zarr storage z-chunk=$z_storage_cz merge_overlapping_chunks=$merge_z_chunks"
     end
 
-    case_tables = DataFrames.DataFrame[]
+    case_df_acc = Ref{Union{Nothing, DataFrames.DataFrame}}(nothing)
     processed_timesteps = 0
     started_at = time()
     processing_seconds = 0.0
     cache_seconds = 0.0
+    timestep_prof = _parse_bool_env("MLCD_GOOGLELES_TIMESTEP_PROFILE", false)
+    prof_each = _parse_bool_env("MLCD_GOOGLELES_TIMESTEP_PROFILE_EACH", false)
+    prof_acc = _GoogleLESProfAcc()
 
     if is_full_case
         if verbose
@@ -233,30 +278,39 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
             # CRITICAL: Materialize q_c into q_c_buf immediately (once per timestep).
             # Accessing a lazy Zarr view repeatedly during _has_cloud_after_2x2 can trigger
             # repeated block decompression. Materialization ensures a single sequential read.
-            q_c_buf .= q_cache["q_c"][local_t, :, :, :]
+            t_qc = @elapsed q_c_buf .= q_cache["q_c"][local_t, :, :, :]
             if !_has_cloud_after_2x2(q_c_buf)
                 processing_seconds += (time() - step_started_at)
                 continue
             end
 
-            # Build sparse z-level mask: true for levels that survive all future coarsening,
-            # false for levels that will be completely coarsened away.
+            t_prep0 = time()
             empty_z_levels = CoarseGraining.identify_empty_z_levels(q_c_buf, DatasetBuilder.CLOUD_PRESENCE_THRESHOLD)
             z_keep_mask = CoarseGraining.build_z_level_keep_mask(empty_z_levels, 1, z_future_factors)
-            any(z_keep_mask) || begin
+            if !any(z_keep_mask)
                 processing_seconds += (time() - step_started_at)
                 continue
             end
-
             nz_z = length(z_keep_mask)
             n_keep_z = count(z_keep_mask)
             n_spans_z = _count_true_spans(z_keep_mask)
             load_full_nonqc = _googleles_use_full_nonqc_timestep_load(n_spans_z, n_keep_z, nz_z)
             spans = _collect_true_spans(z_keep_mask)
+            span_groups = if load_full_nonqc
+                nothing
+            elseif merge_z_chunks
+                _group_mask_spans_by_overlapping_z_chunks(spans, nz_z, z_storage_cz)
+            else
+                Vector{UnitRange{Int}}[[r] for r in spans]
+            end
+            t_prep = time() - t_prep0
+
+            t_nonqc = 0.0
+            t_tabular = 0.0
             if load_full_nonqc
-                _materialize_googleles_nonqc_timestep_into!(non_qc_buffers, ds, local_t; field_specs=non_qc_specs)
+                t_nonqc += @elapsed _materialize_googleles_nonqc_timestep_into!(non_qc_buffers, ds, local_t; field_specs=non_qc_specs)
                 for z_range in spans
-                    _googleles_tabular_one_span!(
+                    t_tabular += @elapsed _googleles_tabular_one_span!(
                         z_range,
                         q_c_buf,
                         non_qc_buffers,
@@ -269,18 +323,13 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                         site_id,
                         month,
                         experiment,
-                        case_tables,
+                        case_df_acc,
                         t_idx,
                     )
                 end
             else
-                span_groups = if merge_z_chunks
-                    _group_mask_spans_by_overlapping_z_chunks(spans, nz_z, z_storage_cz)
-                else
-                    Vector{UnitRange{Int}}[[r] for r in spans]
-                end
                 for orig_spans in span_groups
-                    _load_googleles_timestep_fields_into_span_list!(
+                    t_nonqc += @elapsed _load_googleles_timestep_fields_into_span_list!(
                         non_qc_buffers,
                         ds,
                         local_t;
@@ -289,7 +338,7 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                         scratch=non_qc_zarr_scratch,
                     )
                     for z_range in orig_spans
-                        _googleles_tabular_one_span!(
+                        t_tabular += @elapsed _googleles_tabular_one_span!(
                             z_range,
                             q_c_buf,
                             non_qc_buffers,
@@ -302,10 +351,21 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                             site_id,
                             month,
                             experiment,
-                            case_tables,
+                            case_df_acc,
                             t_idx,
                         )
                     end
+                end
+            end
+
+            if timestep_prof
+                _googleles_prof_add!(prof_acc, t_qc, t_prep, t_nonqc, t_tabular)
+                if prof_each
+                    println(
+                        "GoogleLES timestep profile site=$(site_id) month=$(month) t=$(t_idx): " *
+                        "qc=$(round(t_qc; digits=3))s prep=$(round(t_prep; digits=3))s " *
+                        "nonqc=$(round(t_nonqc; digits=3))s tabular=$(round(t_tabular; digits=3))s",
+                    )
                 end
             end
 
@@ -313,10 +373,16 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
             if processed_timesteps % 8 == 0 || processed_timesteps == nt
                 avg_step = processing_seconds / max(processed_timesteps, 1)
                 println("\nGoogleLES processing progress: site=$(site_id), month=$(month), processed=$(processed_timesteps)/$(nt), avg_step_seconds=$(round(avg_step; digits=2))")
+                if timestep_prof && prof_acc.n > 0
+                    println("GoogleLES " * _googleles_prof_fmt_avg(prof_acc))
+                end
             end
         end
 
         println("GoogleLES timestep processing complete for site=$(site_id), month=$(month): total=$(round(processing_seconds; digits=1))s, per_timestep=$(round(processing_seconds / max(nt, 1); digits=2))s")
+        if timestep_prof && prof_acc.n > 0
+            println("GoogleLES timestep profile summary (cloudy timesteps only): " * _googleles_prof_fmt_avg(prof_acc))
+        end
     else
         if verbose
             @info "Processing GoogleLES case in batches of $(effective_batch_size); estimated working set exceeds threshold."
@@ -356,29 +422,40 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                 t_idx = batch_start + local_t - 1
                 _progress_print("GoogleLES", processed_timesteps, nt, "site=$(site_id) month=$(month) experiment=$(experiment) timestep=$(t_idx)", processing_started_at)
 
-                q_c_buf .= q_c_batch[local_t, :, :, :]
+                t_qc = @elapsed q_c_buf .= q_c_batch[local_t, :, :, :]
                 if !_has_cloud_after_2x2(q_c_buf)
                     processing_seconds += (time() - step_started_at)
                     continue
                 end
 
+                t_prep0 = time()
                 empty_z_levels = CoarseGraining.identify_empty_z_levels(q_c_buf, DatasetBuilder.CLOUD_PRESENCE_THRESHOLD)
                 z_keep_mask = CoarseGraining.build_z_level_keep_mask(empty_z_levels, 1, z_future_factors)
-                any(z_keep_mask) || begin
+                if !any(z_keep_mask)
                     processing_seconds += (time() - step_started_at)
                     continue
                 end
-
                 nz_z = length(z_keep_mask)
                 n_keep_z = count(z_keep_mask)
                 n_spans_z = _count_true_spans(z_keep_mask)
                 load_full_nonqc = _googleles_use_full_nonqc_timestep_load(n_spans_z, n_keep_z, nz_z)
                 spans = _collect_true_spans(z_keep_mask)
                 t_load = batch_start + local_t
+                span_groups = if load_full_nonqc
+                    nothing
+                elseif merge_z_chunks
+                    _group_mask_spans_by_overlapping_z_chunks(spans, nz_z, z_storage_cz)
+                else
+                    Vector{UnitRange{Int}}[[r] for r in spans]
+                end
+                t_prep = time() - t_prep0
+
+                t_nonqc = 0.0
+                t_tabular = 0.0
                 if load_full_nonqc
-                    _materialize_googleles_nonqc_timestep_into!(non_qc_buffers, ds, t_load; field_specs=non_qc_specs)
+                    t_nonqc += @elapsed _materialize_googleles_nonqc_timestep_into!(non_qc_buffers, ds, t_load; field_specs=non_qc_specs)
                     for z_range in spans
-                        _googleles_tabular_one_span!(
+                        t_tabular += @elapsed _googleles_tabular_one_span!(
                             z_range,
                             q_c_buf,
                             non_qc_buffers,
@@ -391,18 +468,13 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                             site_id,
                             month,
                             experiment,
-                            case_tables,
+                            case_df_acc,
                             t_idx,
                         )
                     end
                 else
-                    span_groups = if merge_z_chunks
-                        _group_mask_spans_by_overlapping_z_chunks(spans, nz_z, z_storage_cz)
-                    else
-                        Vector{UnitRange{Int}}[[r] for r in spans]
-                    end
                     for orig_spans in span_groups
-                        _load_googleles_timestep_fields_into_span_list!(
+                        t_nonqc += @elapsed _load_googleles_timestep_fields_into_span_list!(
                             non_qc_buffers,
                             ds,
                             t_load;
@@ -411,7 +483,7 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                             scratch=non_qc_zarr_scratch,
                         )
                         for z_range in orig_spans
-                            _googleles_tabular_one_span!(
+                            t_tabular += @elapsed _googleles_tabular_one_span!(
                                 z_range,
                                 q_c_buf,
                                 non_qc_buffers,
@@ -424,10 +496,21 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                                 site_id,
                                 month,
                                 experiment,
-                                case_tables,
+                                case_df_acc,
                                 t_idx,
                             )
                         end
+                    end
+                end
+
+                if timestep_prof
+                    _googleles_prof_add!(prof_acc, t_qc, t_prep, t_nonqc, t_tabular)
+                    if prof_each
+                        println(
+                            "GoogleLES timestep profile site=$(site_id) month=$(month) t=$(t_idx): " *
+                            "qc=$(round(t_qc; digits=3))s prep=$(round(t_prep; digits=3))s " *
+                            "nonqc=$(round(t_nonqc; digits=3))s tabular=$(round(t_tabular; digits=3))s",
+                        )
                     end
                 end
 
@@ -435,20 +518,20 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
                 if processed_timesteps % 8 == 0 || processed_timesteps == nt
                     avg_step = processing_seconds / max(processed_timesteps, 1)
                     println("\nGoogleLES processing progress: site=$(site_id), month=$(month), processed=$(processed_timesteps)/$(nt), avg_step_seconds=$(round(avg_step; digits=2))")
+                    if timestep_prof && prof_acc.n > 0
+                        println("GoogleLES " * _googleles_prof_fmt_avg(prof_acc))
+                    end
                 end
             end
         end
 
         println("GoogleLES timestep processing complete for site=$(site_id), month=$(month): total=$(round(processing_seconds; digits=1))s, per_timestep=$(round(processing_seconds / max(nt, 1); digits=2))s")
+        if timestep_prof && prof_acc.n > 0
+            println("GoogleLES timestep profile summary (cloudy timesteps only): " * _googleles_prof_fmt_avg(prof_acc))
+        end
     end
 
-    final_df = if isempty(case_tables)
-        nothing
-    elseif length(case_tables) == 1
-        case_tables[1]
-    else
-        reduce(vcat, case_tables)
-    end
+    final_df = case_df_acc[]
 
     _progress_finish()
 
@@ -471,8 +554,11 @@ function GoogleLES.build_tabular(site_id::Int, month::Int, experiment::String, o
 
     out_file = case_arrow_path(site_id, month, experiment, output_dir)
     _assert_finite_dataframe(final_df, "GoogleLES final site=$(site_id) month=$(month) experiment=$(experiment)")
-    Arrow.write(out_file, final_df)
+    t_arrow = @elapsed Arrow.write(out_file, final_df)
     println("Wrote GoogleLES case file $(out_file) with $(DataFrames.nrow(final_df)) rows.")
+    if timestep_prof
+        println("GoogleLES Arrow.write wall time: $(round(t_arrow; digits=3))s")
+    end
     _safe_close_http_pools!()
 end
 
@@ -558,7 +644,9 @@ function cfSites.build_tabular(cfSite_number::Int, month::Int, forcing_model::St
 
         df = DatasetBuilder.process_abstract_chunk(fine_fields, metadata_t, spatial_info)
         if size(df, 1) > 0
-            _assert_finite_dataframe(df, "cfSites site=$(cfSite_number) month=$(month) model=$(forcing_model) experiment=$(experiment) timestep=$(t_idx)")
+            if !_parse_bool_env("MLCD_SKIP_FINITE_ASSERT_PER_CHUNK", false)
+                _assert_finite_dataframe(df, "cfSites site=$(cfSite_number) month=$(month) model=$(forcing_model) experiment=$(experiment) timestep=$(t_idx)")
+            end
             if isnothing(final_df)
                 final_df = df
             else

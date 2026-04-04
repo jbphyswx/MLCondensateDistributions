@@ -3,8 +3,8 @@ Read in cfSite data from Zhaoyi, process it into different resolutions etc.
 """
 module cfSites
 
-using NCDatasets: NCDatasets as NC
-using DimensionalData: DimensionalData as DD
+using NCDatasets: NCDatasets
+using DimensionalData: DimensionalData
 
 export get_LES_library
 export get_shallow_LES_library
@@ -378,7 +378,7 @@ function load_4d_fields(les_dir::String, vars::Vector{String}; verbose=true)
     nx, ny, nz = 0, 0, 0
     x_coords, y_coords, z_coords = Float64[], Float64[], Float64[]
     
-    NC.NCDataset(first_nc_files[1], "r") do ds
+    NCDatasets.NCDataset(first_nc_files[1], "r") do ds
         dims_grp = ds.group["dims"]
         nx = dims_grp.dim["x"]
         ny = dims_grp.dim["y"]
@@ -402,7 +402,7 @@ function load_4d_fields(les_dir::String, vars::Vector{String}; verbose=true)
         nc_files = filter(f -> endswith(f, ".nc"), readdir(time_dir, join=true))
         
         for file in nc_files
-            NC.NCDataset(file, "r") do ds
+            NCDatasets.NCDataset(file, "r") do ds
                 dims_grp = ds.group["dims"]
                 fields_grp = ds.group["fields"]
                 
@@ -444,7 +444,7 @@ function load_4d_fields(les_dir::String, vars::Vector{String}; verbose=true)
     p0_array = Float32[]
     
     try
-        NC.NCDataset(stats_file, "r") do ds
+        NCDatasets.NCDataset(stats_file, "r") do ds
             # PyCLES often stores p0 in `profiles`
             if haskey(ds.group, "profiles") && haskey(ds.group["profiles"], "p0")
                 p0_array = Float32[Float32(x) for x in ds.group["profiles"]["p0"][:]]
@@ -459,26 +459,25 @@ function load_4d_fields(les_dir::String, vars::Vector{String}; verbose=true)
     end
     
     # Apply DimensionalData labels
-    XDim = DD.X(x_coords)
-    YDim = DD.Y(y_coords)
-    ZDim = DD.Z(z_coords)
-    TDim = DD.Ti(timestamps)
+    XDim = DimensionalData.X(x_coords)
+    YDim = DimensionalData.Y(y_coords)
+    ZDim = DimensionalData.Z(z_coords)
+    TDim = DimensionalData.Ti(timestamps)
 
     output_list = Pair{Symbol, Any}[]
     
     for v in vars
-        push!(output_list, Symbol(v) => DD.DimArray(data_arrays[v], (XDim, YDim, ZDim, TDim), name=Symbol(v)))
+        push!(output_list, Symbol(v) => DimensionalData.DimArray(data_arrays[v], (XDim, YDim, ZDim, TDim), name=Symbol(v)))
     end
     
     if !isempty(p0_array)
-        push!(output_list, :p0 => DD.DimArray(p0_array, (DD.Z(z_coords),), name=:p0))
+        push!(output_list, :p0 => DimensionalData.DimArray(p0_array, (DimensionalData.Z(z_coords),), name=:p0))
     end
     
-    return DD.DimStack(NamedTuple(output_list))
+    return DimensionalData.DimStack(NamedTuple(output_list))
 end
 
 using ..DatasetBuilder: DatasetBuilder
-import Arrow
 
 """
     build_tabular(args...; kwargs...)

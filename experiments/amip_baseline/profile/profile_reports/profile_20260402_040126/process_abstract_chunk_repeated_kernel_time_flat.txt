@@ -1,0 +1,6 @@
+label=process_abstract_chunk repeated kernel
+format=flat sortedby=count mincount=5
+
+ Count  Overhead File                                                                                                                        Line Function
+ =====  ======== ====                                                                                                                        ==== ========
+Total snapshots: 2. Utilization: 100% across all threads and tasks. Use the `groupby` kwarg to break down by thread and/or task.

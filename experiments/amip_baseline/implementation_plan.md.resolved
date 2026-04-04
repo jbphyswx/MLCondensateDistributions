@@ -1,0 +1,126 @@
+# TKE Pipeline Remediation Plan (Resolved)
+
+## Scope
+This plan is limited to TKE definition, implementation correctness, allocation behavior, and data-schema observability for TKE-related QA in the AMIP baseline pipeline.
+
+## Problem Statement
+The current TKE path has become ambiguous and potentially inconsistent across:
+- formula definition (raw velocity vs variance-based),
+- implementation location (`dataset_builder` inline math vs `dynamics` helpers),
+- API surface (`calc_tke` export vs `TKE` methods),
+- validation/tests (insufficient invariants),
+- observability (cannot fully diagnose from Arrow rows alone).
+
+Observed symptom: negative values were present in the `tke` column of processed rows, which is incompatible with variance-based TKE.
+
+## Constraints
+- No behavior changes should land without explicit plan approval.
+- Keep training feature interface stable unless approved (`:tke` remains as feature name).
+- Preserve existing file format compatibility where possible; if schema changes, perform explicit migration.
+- Prefer reproducible tests over manual inspection.
+
+## Canonical Physics Definition (Proposed)
+At coarse scale:
+$$
+\mathrm{TKE} = \frac{1}{2}\left(\mathrm{var}(u)+\mathrm{var}(v)+\mathrm{var}(w)\right)
+$$
+with block variances computed as:
+$$
+\mathrm{var}(u) = \langle u^2 \rangle - \langle u \rangle^2
+$$
+(and analogously for $v,w$).
+
+This implies product moments (`<u^2>`, `<v^2>`, `<w^2>`) and coarse means (`<u>`, `<v>`, `<w>`) are required if TKE is derived per block.
+
+## Decision Log (Resolved)
+1. TKE source of truth:
+- Resolved to variance-based derivation at each coarse level.
+- Rationale: GoogleLES case metadata inspection shows no native `tke` variable (`has_tke=false`, 39 vars listed), so Option B is not available for this dataset.
+
+2. Helper API:
+- Consolidate on one public function family in `dynamics.jl` (`tke_from_variances` + `kinetic_energy`), remove ambiguous overloads.
+
+3. Schema observability:
+- Add QA-only temperature column (`ta`) or equivalent diagnostic needed to audit phase/TKE context from Arrow rows.
+
+## Work Breakdown
+
+### Phase 1: Definition and API alignment
+- Define and document canonical TKE formula in `utils/dynamics.jl` and `dataset_spec` notes.
+- Make function names and exports internally consistent.
+- Remove dead or ambiguous overloads.
+
+Acceptance:
+- Single unambiguous callable path for TKE.
+- Docstrings match implementation and units.
+
+### Phase 2: Correctness-first tests
+Add/extend tests to enforce:
+- `tke >= 0` (within tight tolerance) for generated rows.
+- Exact/near identity checks for synthetic fields with known means/variances.
+- Regression fixture where signed velocity means cancel but variance remains positive.
+- `q_con == q_liq + q_ice` remains true (existing related invariant retained).
+
+Acceptance:
+- New tests fail on old bug pattern and pass on fixed path.
+
+### Phase 3: Allocation and performance review
+- Profile `process_abstract_chunk` with representative block sizes.
+- Confirm whether moment arrays (`c_prod_u_u`, etc.) are dominant allocators.
+- If needed, introduce buffer reuse/in-place transforms for moment fields.
+
+Acceptance:
+- Allocation profile documented before/after.
+- No correctness regression under tests.
+
+### Phase 4: Data observability and migration
+- Add QA field(s) needed for post-hoc diagnostics (proposed `ta`).
+- Regenerate historical processed files after schema bump.
+- Add a deterministic dataset validator pass:
+  - finite checks,
+  - schema checks,
+  - TKE nonnegativity,
+  - key identities.
+
+Acceptance:
+- All processed files pass validator.
+- Explicit migration note in README/changelog.
+
+### Phase 5: Workflow bookkeeping cleanup
+- Make processed-data directory authoritative with case-level status artifacts.
+- Keep workflow cache optional/index-only (not source of truth).
+
+Acceptance:
+- Status of each case visible from processed directory alone.
+
+## Risks and Mitigations
+- Risk: changing TKE definition shifts model behavior.
+  - Mitigation: run before/after training smoke run; compare loss and target metrics.
+- Risk: schema update breaks old readers.
+  - Mitigation: backward-compatible loader behavior + migration step.
+- Risk: performance regressions from extra QA fields.
+  - Mitigation: gate QA columns as optional and benchmark.
+
+## Verification Matrix
+- Unit tests: dynamics + dataset builder invariants.
+- Integration smoke: generate one GoogleLES case, inspect TKE range.
+- Dataset validation: full processed directory scan.
+- Training smoke: 1-epoch run with finite losses.
+
+## Rollback Plan
+- Revert to previous schema and TKE path if:
+  - correctness tests fail repeatedly,
+  - training becomes unstable,
+  - allocations regress beyond agreed threshold.
+
+Rollback artifacts:
+- prior `dataset_builder.jl`,
+- prior `dynamics.jl`,
+- previous processed snapshot tag/path.
+
+## Approval Checklist
+- [x] TKE source resolved to variance-based derivation (no native LES `tke` field).
+- [ ] Approve helper API consolidation in `dynamics.jl`.
+- [ ] Approve QA schema addition (`ta` or equivalent).
+- [ ] Approve full historical reprocess.
+- [ ] Approve workflow-cache-as-index model.

@@ -1,5 +1,6 @@
 using Test: Test
 using DataFrames: DataFrames
+using Statistics: Statistics
 
 include("../utils/coarse_graining.jl")
 include("../utils/dynamics.jl")
@@ -82,8 +83,8 @@ Test.@testset "Dataset Builder Orchestration Unit Test" begin
     z_levels = sort(unique(df.resolution_z))
     Test.@test length(h_levels) > 1
     Test.@test length(z_levels) > 1
-    Test.@test minimum(h_levels) >= 100.0f0
-    Test.@test maximum(z_levels) <= 400.0f0
+    Test.@test Statistics.minimum(h_levels) >= 100.0f0
+    Test.@test Statistics.maximum(z_levels) <= 400.0f0
 
     # Ensure (resolution_h, resolution_z) combinations are present.
     hz_pairs = unique(zip(df.resolution_h, df.resolution_z))
@@ -135,7 +136,7 @@ Test.@testset "GoogleLES metadata schema regression" begin
 
     # Regression guard: vertical resolution ladder should be present.
     z_levels = sort(unique(df.resolution_z))
-    Test.@test minimum(z_levels) == 25.0f0
-    Test.@test maximum(z_levels) == 400.0f0
+    Test.@test Statistics.minimum(z_levels) == 25.0f0
+    Test.@test Statistics.maximum(z_levels) == 400.0f0
     Test.@test length(z_levels) >= 3
 end

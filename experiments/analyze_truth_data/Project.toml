@@ -1,0 +1,8 @@
+[deps]
+Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+MLCondensateDistributions = "7c54ba8f-093f-4729-83e1-3e38b97e2ff2"
+
+[sources]
+MLCondensateDistributions = {path = "../.."}

@@ -7,7 +7,7 @@ using .GoogleLES: GoogleLES as GL
 
 Test.@testset "Google Cloud Zarr Access Tests" begin
     @info "Testing lazy metadata load from Google Cloud..."
-    
+
     # Test valid site, month, experiment
     ds = GL.load_zarr_simulation(0, 1, "amip")
     
