@@ -195,6 +195,9 @@ function batch_generate_data!(;
     println("Pause between batches: $(pause_between_batches)")
     println("Force reprocess: $(force_reprocess)")
     println("Timestep batch size: $(timestep_batch_size)")
+    if verbose
+        println(MLCD.tabular_build_options_summary(tabular_options))
+    end
 
     cache_path = MLCD.WorkflowState.checked_cases_path("amip_baseline")
     processed_rows = 0

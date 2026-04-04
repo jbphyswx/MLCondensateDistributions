@@ -100,6 +100,9 @@ if abspath(PROGRAM_FILE) == @__FILE__
     min_h_resolution = parse(Float32, get(ENV, "MIN_H_RESOLUTION", string(DEFAULT_MIN_H_RESOLUTION)))
     verbose = MLCD.EnvHelpers.parse_bool_env("VERBOSE_GENERATION", DEFAULT_VERBOSE_LOGS)
     tabular_opts = MLCD.tabular_build_options_from_env()
+    if verbose
+        println(MLCD.tabular_build_options_summary(tabular_opts))
+    end
     generate_data!(;
         include_cfsites=include_cfsites,
         max_timesteps=max_timesteps,

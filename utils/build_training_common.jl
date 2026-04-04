@@ -107,7 +107,7 @@ Immutable: use [`tabular_options_with`](@ref) to copy an existing options object
 overrides in one shot, use [`tabular_build_options_from_env(; kwargs...)`](@ref).
 """
 Base.@kwdef struct TabularBuildOptions
-    coarsening_mode::Symbol = :binary
+    coarsening_mode::Symbol = :hybrid
     fullcase_bytes_limit::Int = GOOGLELES_FULLCASE_BYTES_LIMIT
     force_fullcase::Bool = true
     z_chunk_merge::Bool = true
@@ -155,6 +155,22 @@ function tabular_options_with(t::TabularBuildOptions;
 end
 
 """
+    tabular_build_options_summary(opts::TabularBuildOptions) -> String
+
+Single-line summary for logging (coarsening mode and main GoogleLES I/O knobs).
+"""
+function tabular_build_options_summary(o::TabularBuildOptions)::String
+    return string(
+        "TabularBuildOptions: coarsening_mode=", o.coarsening_mode,
+        ", force_fullcase=", o.force_fullcase,
+        ", z_chunk_merge=", o.z_chunk_merge,
+        ", nonqc_strategy=", repr(o.nonqc_strategy),
+        ", nonqc_single_fused_load=", o.nonqc_single_fused_load,
+        ", fuse_span_z_reads=", o.fuse_span_z_reads,
+    )
+end
+
+"""
     tabular_build_options_from_env(; kwargs...)
 
 Read these `MLCD_*` variables once and return a [`TabularBuildOptions`](@ref) (CLI entrypoints only;
@@ -163,7 +179,7 @@ corresponding env-derived fields in a **single** construction (no extra copy).
 
 | Field | Environment variable |
 |-------|----------------------|
-| `coarsening_mode` | `MLCD_COARSENING_MODE` (`binary`, `convolutional` / `conv`) |
+| `coarsening_mode` | `MLCD_COARSENING_MODE` (`hybrid` default, `block`, `sliding`, `binary` deprecated, `convolutional` deprecated) |
 | `fullcase_bytes_limit` | `MLCD_GOOGLELES_FULLCASE_BYTES_LIMIT` |
 | `force_fullcase` | `MLCD_GOOGLELES_FORCE_FULLCASE` |
 | `z_chunk_merge` | `MLCD_GOOGLELES_Z_CHUNK_MERGE` |
@@ -176,11 +192,19 @@ corresponding env-derived fields in a **single** construction (no extra copy).
 | `close_http_pools` | `MLCD_CLOSE_HTTP_POOLS` |
 """
 function tabular_build_options_from_env(; kw...)::TabularBuildOptions
-    coarsening_raw = lowercase(strip(get(ENV, "MLCD_COARSENING_MODE", "binary")))
-    coarsening_mode = if coarsening_raw in ("convolutional", "conv")
+    coarsening_raw = lowercase(strip(get(ENV, "MLCD_COARSENING_MODE", "hybrid")))
+    coarsening_mode = if coarsening_raw in ("hybrid", "default")
+        :hybrid
+    elseif coarsening_raw in ("block", "block_truncated")
+        :block
+    elseif coarsening_raw == "sliding"
+        :sliding
+    elseif coarsening_raw in ("convolutional", "conv", "legacy_conv", "divisor_conv")
         :convolutional
-    else
+    elseif coarsening_raw in ("binary", "legacy_binary")
         :binary
+    else
+        throw(ArgumentError("MLCD_COARSENING_MODE=$(repr(coarsening_raw)) is not recognized; use hybrid, block, sliding, binary, or convolutional."))
     end
     base = (;
         coarsening_mode = coarsening_mode,

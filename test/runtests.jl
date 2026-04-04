@@ -10,6 +10,7 @@ Test.@testset "MLCondensateDistributions Full Test Suite" begin
     include("test_vertical_coarsening.jl")
     include("test_array_utils.jl")
     include("test_coarsening_pipeline.jl")
+    include("test_reduction_specs.jl")
     include("test_googleles_z_chunk_grouping.jl")
     include("test_googleles_nonqc_strategy.jl")
     include("test_googleles_timestep_profile.jl")

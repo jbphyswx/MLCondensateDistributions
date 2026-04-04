@@ -4,14 +4,17 @@ using DataFrames: DataFrames
 using ..CoarseGraining: CoarseGraining
 using ..Dynamics: Dynamics
 
-export process_abstract_chunk, SCHEMA_SYMBOL_ORDER
+include("reduction_specs.jl")
+using .ReductionSpecs
+
+export process_abstract_chunk, SCHEMA_SYMBOL_ORDER, ReductionSpecs, DatasetBuilderImpl
 
 const CLOUD_PRESENCE_THRESHOLD = 1f-10
 
 """
     SCHEMA_SYMBOL_ORDER
 
-The strictly enforced, 36-column canonical sequence for the ML training dataset.
+The strictly enforced canonical column sequence for the ML training dataset (includes reduction metadata columns).
 """
 const SCHEMA_SYMBOL_ORDER = (
     :qt, :theta_li, :ta, :p, :rho, :w, :q_liq, :q_ice, :q_con,
@@ -21,6 +24,7 @@ const SCHEMA_SYMBOL_ORDER = (
     :cov_qt_ql, :cov_qt_qi, :cov_qt_w, :cov_qt_h,
     :cov_ql_qi, :cov_ql_w, :cov_ql_h, :cov_qi_w, :cov_qi_h, :cov_w_h,
     :resolution_h, :domain_h, :resolution_z, :data_source, :month, :cfSite_number, :forcing_model, :experiment,
+    :reduction_kind, :reduction_nh, :reduction_fz, :truncation_x, :truncation_y, :truncation_z,
 )
 
 @inline function _indicator_01(x::Real, threshold::Float32)
@@ -67,8 +71,14 @@ function flatten_and_filter!(
     dz_profile::AbstractVector{FT},
     resolution_h::FT,
     domain_h::FT,
-    metadata,
-) where  {FT <: Real}
+    metadata;
+    reduction_kind::AbstractString = "binary",
+    reduction_nh::Int = -1,
+    reduction_fz::Int = -1,
+    truncation_x::Int = -1,
+    truncation_y::Int = -1,
+    truncation_z::Int = -1,
+) where {FT <: Real}
 
     nx, ny, nz = size(mask)
     size(qt) == (nx, ny, nz) || throw(DimensionMismatch("qt shape $(size(qt)) vs mask $(size(mask))"))
@@ -190,6 +200,12 @@ function flatten_and_filter!(
     df[!, :cfSite_number] = fill(meta_cf, n_valid)
     df[!, :forcing_model] = fill(meta_fm, n_valid)
     df[!, :experiment] = fill(meta_ex, n_valid)
+    df[!, :reduction_kind] = fill(reduction_kind, n_valid)
+    df[!, :reduction_nh] = fill(reduction_nh, n_valid)
+    df[!, :reduction_fz] = fill(reduction_fz, n_valid)
+    df[!, :truncation_x] = fill(truncation_x, n_valid)
+    df[!, :truncation_y] = fill(truncation_y, n_valid)
+    df[!, :truncation_z] = fill(truncation_z, n_valid)
     return nothing
 end
 

@@ -1,6 +1,7 @@
 module ArrayUtils
 
 using Statistics: Statistics
+using Base.Threads: @threads, nthreads
 
 export seed_factor_ladder,
     build_schedule_from_seeds,
@@ -13,6 +14,11 @@ export seed_factor_ladder,
     coarsen3d_vertical_mean!,
     conv3d_block_mean,
     conv3d_block_mean!,
+    conv3d_valid_box_mean,
+    conv3d_valid_box_mean!,
+    conv3d_valid_box_product_mean,
+    conv3d_valid_box_product_mean!,
+    valid_box_output_extent,
     coarsen_fields_horizontal,
     coarsen_fields_vertical,
     coarsen_dz_profile_2x,
@@ -383,6 +389,196 @@ function conv3d_block_mean(data::AbstractArray{T, 3}, fx::Int, fy::Int, fz::Int)
     nx, ny, nz = size(data)
     out = similar(data, div(nx, fx), div(ny, fy), div(nz, fz))
     return conv3d_block_mean!(out, data, fx, fy, fz)
+end
+
+"""
+    valid_box_output_extent(n, window, stride) -> Int
+
+Number of valid starting positions along one axis (1-based origin), or `0` if `n < window`.
+"""
+function valid_box_output_extent(n::Int, window::Int, stride::Int)
+    window >= 1 && stride >= 1 || throw(ArgumentError("window and stride must be >= 1"))
+    n < window && return 0
+    return div(n - window, stride) + 1
+end
+
+"""
+    conv3d_valid_box_mean!(out, data, wx, wy, wz; stride_h=1, stride_v=1, stride_z=1)
+
+Valid (non-padded) 3D box average: each output cell `(io,jo,ko)` averages
+`data[i0:(i0+wx-1), j0:(j0+wy-1), k0:(k0+wz-1)]` with
+`i0 = 1 + (io-1)*stride_h`, etc.
+"""
+function conv3d_valid_box_mean!(
+    out::AbstractArray{T, 3},
+    data::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int;
+    stride_h::Int = 1,
+    stride_v::Int = 1,
+    stride_z::Int = 1,
+) where {T <: Real}
+    wx >= 1 && wy >= 1 && wz >= 1 || throw(ArgumentError("window sizes must be >= 1"))
+    stride_h >= 1 && stride_v >= 1 && stride_z >= 1 || throw(ArgumentError("strides must be >= 1"))
+    nx, ny, nz = size(data)
+    nxo = valid_box_output_extent(nx, wx, stride_h)
+    nyo = valid_box_output_extent(ny, wy, stride_v)
+    nzo = valid_box_output_extent(nz, wz, stride_z)
+    (nxo == 0 || nyo == 0 || nzo == 0) && throw(DimensionMismatch("window too large for data"))
+    size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch for conv3d_valid_box_mean"))
+    inv_vol = one(T) / T(wx * wy * wz)
+    if nthreads() > 1 && nxo * nyo * nzo >= 2048
+        @threads for io in 1:nxo
+            i0 = 1 + (io - 1) * stride_h
+            @inbounds for ko in 1:nzo
+                k0 = 1 + (ko - 1) * stride_z
+                for jo in 1:nyo
+                    j0 = 1 + (jo - 1) * stride_v
+                    acc = zero(T)
+                    for kk in 0:(wz - 1)
+                        z = k0 + kk
+                        for jj in 0:(wy - 1)
+                            y = j0 + jj
+                            for ii in 0:(wx - 1)
+                                x = i0 + ii
+                                acc += data[x, y, z]
+                            end
+                        end
+                    end
+                    out[io, jo, ko] = acc * inv_vol
+                end
+            end
+        end
+    else
+        @inbounds for ko in 1:nzo
+            k0 = 1 + (ko - 1) * stride_z
+            for jo in 1:nyo
+                j0 = 1 + (jo - 1) * stride_v
+                for io in 1:nxo
+                    i0 = 1 + (io - 1) * stride_h
+                    acc = zero(T)
+                    for kk in 0:(wz - 1)
+                        z = k0 + kk
+                        for jj in 0:(wy - 1)
+                            y = j0 + jj
+                            for ii in 0:(wx - 1)
+                                x = i0 + ii
+                                acc += data[x, y, z]
+                            end
+                        end
+                    end
+                    out[io, jo, ko] = acc * inv_vol
+                end
+            end
+        end
+    end
+    return out
+end
+
+function conv3d_valid_box_mean(
+    data::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int;
+    stride_h::Int = 1,
+    stride_v::Int = 1,
+    stride_z::Int = 1,
+) where {T <: Real}
+    nx, ny, nz = size(data)
+    nxo = valid_box_output_extent(nx, wx, stride_h)
+    nyo = valid_box_output_extent(ny, wy, stride_v)
+    nzo = valid_box_output_extent(nz, wz, stride_z)
+    (nxo == 0 || nyo == 0 || nzo == 0) && throw(DimensionMismatch("window too large for data"))
+    out = similar(data, nxo, nyo, nzo)
+    return conv3d_valid_box_mean!(out, data, wx, wy, wz; stride_h, stride_v, stride_z)
+end
+
+function conv3d_valid_box_product_mean!(
+    out::AbstractArray{T, 3},
+    x::AbstractArray{T, 3},
+    y::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int;
+    stride_h::Int = 1,
+    stride_v::Int = 1,
+    stride_z::Int = 1,
+) where {T <: Real}
+    size(x) == size(y) || throw(DimensionMismatch("x and y must match shape"))
+    wx >= 1 && wy >= 1 && wz >= 1 || throw(ArgumentError("window sizes must be >= 1"))
+    stride_h >= 1 && stride_v >= 1 && stride_z >= 1 || throw(ArgumentError("strides must be >= 1"))
+    nx, ny, nz = size(x)
+    nxo = valid_box_output_extent(nx, wx, stride_h)
+    nyo = valid_box_output_extent(ny, wy, stride_v)
+    nzo = valid_box_output_extent(nz, wz, stride_z)
+    (nxo == 0 || nyo == 0 || nzo == 0) && throw(DimensionMismatch("window too large for data"))
+    size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch"))
+    inv_vol = one(T) / T(wx * wy * wz)
+    if nthreads() > 1 && nxo * nyo * nzo >= 2048
+        @threads for io in 1:nxo
+            i0 = 1 + (io - 1) * stride_h
+            @inbounds for ko in 1:nzo
+                k0 = 1 + (ko - 1) * stride_z
+                for jo in 1:nyo
+                    j0 = 1 + (jo - 1) * stride_v
+                    acc = zero(T)
+                    for kk in 0:(wz - 1)
+                        z = k0 + kk
+                        for jj in 0:(wy - 1)
+                            yy = j0 + jj
+                            for ii in 0:(wx - 1)
+                                xi = i0 + ii
+                                acc += x[xi, yy, z] * y[xi, yy, z]
+                            end
+                        end
+                    end
+                    out[io, jo, ko] = acc * inv_vol
+                end
+            end
+        end
+    else
+        @inbounds for ko in 1:nzo
+            k0 = 1 + (ko - 1) * stride_z
+            for jo in 1:nyo
+                j0 = 1 + (jo - 1) * stride_v
+                for io in 1:nxo
+                    i0 = 1 + (io - 1) * stride_h
+                    acc = zero(T)
+                    for kk in 0:(wz - 1)
+                        z = k0 + kk
+                        for jj in 0:(wy - 1)
+                            yy = j0 + jj
+                            for ii in 0:(wx - 1)
+                                xi = i0 + ii
+                                acc += x[xi, yy, z] * y[xi, yy, z]
+                            end
+                        end
+                    end
+                    out[io, jo, ko] = acc * inv_vol
+                end
+            end
+        end
+    end
+    return out
+end
+
+function conv3d_valid_box_product_mean(
+    x::AbstractArray{T, 3},
+    y::AbstractArray{T, 3},
+    wx::Int,
+    wy::Int,
+    wz::Int;
+    stride_h::Int = 1,
+    stride_v::Int = 1,
+    stride_z::Int = 1,
+) where {T <: Real}
+    nx, ny, nz = size(x)
+    nxo = valid_box_output_extent(nx, wx, stride_h)
+    nyo = valid_box_output_extent(ny, wy, stride_v)
+    nzo = valid_box_output_extent(nz, wz, stride_z)
+    out = similar(x, nxo, nyo, nzo)
+    return conv3d_valid_box_product_mean!(out, x, y, wx, wy, wz; stride_h, stride_v, stride_z)
 end
 
 """

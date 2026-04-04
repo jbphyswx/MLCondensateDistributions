@@ -4,7 +4,7 @@ using Random: Random
 include("../utils/coarse_graining.jl")
 include("../utils/dynamics.jl")
 include("../utils/dataset_builder.jl")
-include("../utils/dataset_builder_impl.jl")
+using .DatasetBuilder: DatasetBuilder, DatasetBuilderImpl
 
 Test.@testset "DatasetBuilderImpl parity and allocation guard" begin
     Random.seed!(42)
@@ -37,6 +37,7 @@ Test.@testset "DatasetBuilderImpl parity and allocation guard" begin
         :domain_h => Float32((nx - 1) * 50),
         :min_h_resolution => Float32(1000),
         :dz_native_profile => fill(Float32(20), nz),
+        :coarsening_mode => :binary,
     )
 
     # Warmup

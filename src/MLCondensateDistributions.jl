@@ -29,6 +29,7 @@ include("../utils/analysis.jl")
 
 # 2. Dataset Logic Hub (Used by data source modules)
 include("../utils/dataset_builder.jl")
+using .DatasetBuilder: ReductionSpecs
 
 # 3. Data Source Modules (Provide source-specific loaders and 'build_tabular' methods)
 include("../utils/GoogleLES.jl")
@@ -60,7 +61,8 @@ write_training_diagnostics(args...) = nothing
 
 # Export submodules for use in experiments
 export Paths, WorkflowState, Dynamics, CoarseGraining, DatasetBuilder, GoogleLES, cfSites
-export TabularBuildOptions, tabular_build_options_from_env, tabular_options_with
+export TabularBuildOptions, tabular_build_options_from_env, tabular_options_with, tabular_build_options_summary
+export ReductionSpecs
 export DataHandling, Analysis, EnvHelpers, Common
 export Viz
 export CondensateMLP, load_processed_data, standardize_data, train_model

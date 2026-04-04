@@ -109,3 +109,22 @@ Test.@testset "ArrayUtils 3D pooling in-place zero allocations" begin
     allocs = @allocations coarsen3d_horizontal_mean!(out, a, 2, 2)
     Test.@test allocs == 0
 end
+
+Test.@testset "ArrayUtils conv3d_valid_box_mean vs brute force" begin
+    nx, ny, nz = 7, 8, 5
+    data = rand(Float32, nx, ny, nz)
+    wx, wy, wz = 3, 2, 2
+    out = conv3d_valid_box_mean(data, wx, wy, wz)
+    nxo, nyo, nzo = size(out)
+    invv = 1 / Float32(wx * wy * wz)
+    for ko in 1:nzo, jo in 1:nyo, io in 1:nxo
+        i0 = 1 + (io - 1)
+        j0 = 1 + (jo - 1)
+        k0 = 1 + (ko - 1)
+        acc = zero(Float32)
+        for kk in 0:(wz - 1), jj in 0:(wy - 1), ii in 0:(wx - 1)
+            acc += data[i0 + ii, j0 + jj, k0 + kk]
+        end
+        Test.@test out[io, jo, ko] ≈ acc * invv
+    end
+end

@@ -16,6 +16,8 @@ export build_horizontal_levels,
     coarsen3d_vertical_mean,
     coarsen_products_at_level,
     coarsen_products_3d_block,
+    coarsen_fields_valid_box,
+    coarsen_products_valid_box,
     covariance_from_moments,
     build_horizontal_multilevel_views
 
@@ -187,6 +189,49 @@ function coarsen_products_3d_block(
             end
         end
         prod_coarse
+    end
+    return NamedTuple{PN}(vals)
+end
+
+"""
+    coarsen_fields_valid_box(fields, wx, wy, wz; stride_h=1, stride_v=1, stride_z=1)
+
+Valid sliding 3D box mean for every field in `fields` (same numerics as [`ArrayUtils.conv3d_valid_box_mean`](@ref)).
+"""
+function coarsen_fields_valid_box(
+    fields::NamedTuple{FN, FV},
+    wx::Int,
+    wy::Int,
+    wz::Int;
+    stride_h::Int = 1,
+    stride_v::Int = 1,
+    stride_z::Int = 1,
+) where {FN, FV <: Tuple}
+    vals = map(arr -> Array(conv3d_valid_box_mean(arr, wx, wy, wz; stride_h, stride_v, stride_z)), values(fields))
+    return NamedTuple{FN}(vals)
+end
+
+"""
+    coarsen_products_valid_box(fields, product_pairs, wx, wy, wz; stride_h=1, stride_v=1, stride_z=1)
+
+Sliding local mean of `x .* y` over each valid `wx×wy×wz` window.
+"""
+function coarsen_products_valid_box(
+    fields::NamedTuple{FN, FV},
+    product_pairs::NamedTuple{PN, PV},
+    wx::Int,
+    wy::Int,
+    wz::Int;
+    stride_h::Int = 1,
+    stride_v::Int = 1,
+    stride_z::Int = 1,
+) where {FN, FV <: Tuple, PN, PV <: Tuple}
+    vals = map(PN) do out_name
+        x_name, y_name = getproperty(product_pairs, out_name)
+        x = _container_get_field(fields, _field_name_key(x_name))
+        y = _container_get_field(fields, _field_name_key(y_name))
+        size(x) == size(y) || throw(DimensionMismatch("Fields for product $(out_name) have mismatched sizes"))
+        Array(conv3d_valid_box_product_mean(x, y, wx, wy, wz; stride_h, stride_v, stride_z))
     end
     return NamedTuple{PN}(vals)
 end

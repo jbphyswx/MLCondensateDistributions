@@ -43,7 +43,8 @@ Test.@testset "Dataset Builder Orchestration Unit Test" begin
         :dx_native => 50.0f0,
         :domain_h => 6000.0f0,
         :min_h_resolution => 100.0f0,
-        :dz_native_profile => fill(25.0f0, 16) # 16 vertical levels to match dims
+        :dz_native_profile => fill(25.0f0, 16), # 16 vertical levels to match dims
+        :coarsening_mode => :binary,
     )
     
     @info "Piping through process_abstract_chunk..."
@@ -119,7 +120,8 @@ Test.@testset "GoogleLES metadata schema regression" begin
         :dx_native => 50.0f0,
         :domain_h => 6000.0f0,
         :min_h_resolution => 100.0f0,
-        :dz_native_profile => fill(25.0f0, 16)
+        :dz_native_profile => fill(25.0f0, 16),
+        :coarsening_mode => :binary,
     )
 
     df = DatasetBuilder.process_abstract_chunk(fine_fields, metadata, spatial_info)
