@@ -4,17 +4,43 @@ This document specifies a **multi-year / multi-PR** refactor of how we build mul
 
 Cross-reference: `VERTICAL_COARSENING_PLAN.md` (vertical ladder & z-dropping rules) — align z policy here with that doc where overlap exists.
 
+**Related planning artifact:** Cursor keeps a compact YAML-backed tracker for this effort at `~/.cursor/plans/coarsening_reduction_refactor_3b142058.plan.md` (phase checklist, mermaid sketch, code touchpoints). **This repo document remains canonical** for merged behavior and edge cases; the Cursor file is for editor-side tracking. When they diverge, update **this file** after each significant PR.
+
+---
+
+## 0. Progress snapshot (living — update when behavior changes)
+
+**As of 2026-04** (GoogleLES / `DatasetBuilderImpl` tabular path):
+
+| Area | Status | Code / notes |
+|------|--------|----------------|
+| **User-facing `coarsening_mode`** | **Done** | `:hybrid` (default), `:block`, `:sliding` only. `:binary`, `:convolutional`, legacy aliases → **`ArgumentError`** in `process_abstract_chunk_impl`, or **`MLCD_COARSENING_MODE`** legacy strings → **warn once + `:hybrid`** in `tabular_build_options_from_env`. |
+| **Explicit block factors** | **Done** | `spatial_info.block_triples` (optional); legacy key `convolutional_square_horizontal` → prefer **`block_square_horizontal`**. |
+| **Horizontal block schedule** | **Done** | `truncated_horizontal_sizes`: BFS from `nh_min = ceil(min_h/dx)` with multipliers **2, 3, 5**, cap at `min(nx,ny)`, always include **`nh_max`** if missing. **Removed** the old **`nh_min+1`** extra rung. |
+| **Horizontal tower + cache (block path)** | **Done** | `_block_truncated_horizontal_cache!` in `dataset_builder_impl.jl`: per-`nh` means/products from native or **largest divisor** in cache; products chain with **`coarsen_fields_at_level`** on `<xy>` caches (not `coarsen_products_at_level`). Then vertical **`fz`** per triple. Non-square explicit triples still use one-shot `coarsen_fields_3d_block`. |
+| **Vertical `fz` in block triples** | **Done** | All **`fz \| nz`** with `fz * dz_ref ≤ max_dz` (not binary-only). |
+| **Sliding** | **Done (sparse default)** | Valid-box means/products; **`valid_box_anchor_starts`** when strides not explicit (corner-preserving `K` samples; **`K` capped** to number of valid placements). **`uniform_stride_for_valid_box`** when **`sliding_stride_*`** set. |
+| **Hybrid** | **Done** | Block pass + sliding extras from `hybrid_sliding_extra_sizes_default` / optional `hybrid_sliding_extra_sizes`; same `z_factors` as block for sliding loop. |
+| **Reducer types** | **Partial** | `AbstractReductionSpec` + structs live in **`utils/reduction_specs.jl`**. Orchestration is still **`if coarsening_mode`** in `dataset_builder_impl.jl`, not `process_chunk(::AbstractReductionSpec)`. |
+| **Docs / env** | **Partial** | `docs/googleles_build_tabular.md`, `experiments/amip_baseline/README.md` document modes and `MLCD_*`. `dataset_spec.md` / root README may still need grep for stale mode names. |
+
+**Pivots vs early drafts**
+
+- **No “divisor enumeration from native”** as a user mode: removed; use `:block` + **`block_triples`** if a fixed schedule is required.
+- **Sliding default** prioritizes **anchor starts** (first/last valid flush) over **uniform stride** when strides are not explicit — see `array_utils.jl` / plan §5.5 discussion.
+- **`build_horizontal_multilevel_views`** remains a **staged** API; production block path now **embeds the same chaining idea** for tabular builds.
+
 ---
 
 ## 1. Goals
 
-- [ ] **Reducer dispatch**: One clear API (types or traits) so call sites choose `BlockReduction`, `SlidingConvolution`, or `HybridReduction` (name TBD) without `if coarsening_mode` soup.
-- [ ] **Block reductions**: Non-overlapping blocks; **truncated domain** — use `⌊nx / nh⌋ × nh` cells per horizontal dimension and **discard the remainder** (no fractional blocks, no periodic wrap, no per-block weights for margin).
-- [ ] **Sliding convolution**: **Naive** first pass (correctness), then **performance** passes (threading, cache-friendly loops, optional separable / library kernels) — **no** pretending sliding outputs can reuse the block-reduction cache DAG.
-- [ ] **Hybrid (proposed default)**: Run **fast block-reduction towers** where they tile cleanly, and use **sliding windows** to **fill scale gaps** between what blocks can represent (e.g. between `nh` and `⌊nx/2⌋` coverage — exact gap definition in §4.3).
-- [ ] **Deprecate `binary` as a user-facing mode**: Internally becomes a **schedule** over **block factors** (powers of two, etc.), not a separate mathematical world.
-- [ ] **Tests & perf**: Correctness vs reference (small grids), regression on row counts / statistics, benchmarks on realistic `nx, ny, nz`.
-- [ ] **Terabyte-scale defaults**: Processing must stay tractable on huge corpora — **prefer block/non-overlapping** where it applies; for sliding/conv, **default to the fewest useful origins** (large strides, bounded output count per axis) and **a small, linearly spaced set of window sizes** — not dense stride-1 and not every integer window from `N/2` to `N−1`.
+- [ ] **Reducer dispatch**: One clear API (types or traits) so call sites choose `BlockReduction`, `SlidingConvolution`, or `HybridReduction` **without** `if coarsening_mode` soup. *(Types exist; dispatch still symbolic — **partial**.)*
+- [x] **Block reductions**: Non-overlapping blocks; **truncated domain** — `⌊nx / nh⌋ × nh` per axis, remainder discarded (see `truncated_block_extent`, block path in `dataset_builder_impl.jl`).
+- [x] **Sliding convolution**: Valid-box local means/products implemented (`conv3d_valid_box_*`, `*_at_starts`); **does not** reuse block cache DAG (by design). Further perf (threading, etc.) still open.
+- [x] **Hybrid (default)**: Block tower + sliding gap passes; default **`TabularBuildOptions.coarsening_mode = :hybrid`** and env default **`hybrid`**.
+- [x] **Deprecate `binary` / `convolutional` as user modes**: **Removed** from API (errors + env remap); horizontal schedule uses **{2,3,5} monoid**, not “binary-only ladder.”
+- [~] **Tests & perf**: Many unit/integration tests; **large-N perf regression** vs stride-1 baseline (§9 Phase 5b) still open.
+- [x] **Terabyte-scale defaults**: Sparse sliding outputs (`sliding_outputs_*` default 2), window budget (`sliding_window_budget_h`), subsampled sliding triples — see Phase 5b.
 
 Non-goals (initially):
 
@@ -23,12 +49,12 @@ Non-goals (initially):
 
 ---
 
-## 2. Current state (baseline to replace)
+## 2. Current state (shipped tabular builder)
 
-- [ ] Documented in code review: `DatasetBuilderImpl.process_abstract_chunk_impl` branches on `coarsening_mode`:
-  - **`:binary`**: horizontal seed ladder + **chained** horizontal coarsening; vertical **×2** ladder from `dz` scheme; reuses intermediates.
-  - **`:convolutional`**: enumerates divisor triples `(fx, fy, fz)`; each triple **re-pools from native** — flexible shapes but **expensive** and **grid-dependent**.
-- [ ] `TabularBuildOptions.coarsening_mode` + `spatial_info` keys (`convolutional_triples`, etc.) — list all touchpoints in a migration table (§8).
+- [x] **`DatasetBuilderImpl.process_abstract_chunk_impl`** branches on **`coarsening_mode`**: `:hybrid` → block truncated + hybrid sliding; `:block` / `:block_truncated` → block only; `:sliding` → sliding triples only. Removed modes **throw** `ArgumentError` with migration text.
+- [x] **`TabularBuildOptions`**: `coarsening_mode`, `sliding_outputs_h|v|z`, `sliding_window_budget_h`; **`tabular_build_options_from_env`** reads **`MLCD_COARSENING_MODE`**, **`MLCD_SLIDING_*`**, etc.
+- [x] **`spatial_info`**: `coarsening_mode`, `min_h_resolution`, `block_triples` (optional), `block_square_horizontal` (legacy `convolutional_square_horizontal`), `sliding_stride_*`, `sliding_outputs_*`, `sliding_window_budget_h`, optional `hybrid_sliding_extra_sizes`.
+- [ ] **Touchpoint audit**: periodic **`rg coarsening_mode|convolutional|binary`** across `experiments/`, `docs/`, `README` — keep migration table (§8) current.
 
 ---
 
@@ -42,31 +68,33 @@ Define **immutable** config types (names negotiable):
 | `SlidingConvolutionSpec` | Valid box, stride `s` — **default is sparse** (few origins per axis, e.g. **2** to cover left/right); optional dense `s = 1` for research | See §5 |
 | `HybridReductionSpec` | Holds `BlockReductionSpec` schedule + `SlidingConvolutionSpec` targets for **gap scales** | Union of outputs (tagged by `reduction_kind` metadata) |
 
-**Dispatch rule**: `process_chunk(fields, reducer::AbstractReductionSpec, ...)` or equivalent — **one** internal pipeline per type; hybrid orchestrates the other two.
+**Dispatch rule (target)**: `process_chunk(fields, reducer::AbstractReductionSpec, ...)` — **one** internal pipeline per type; hybrid orchestrates the other two. **Today:** symbolic `coarsening_mode` + shared helpers from `ReductionSpecs` / `CoarseningPipeline`.
 
 Checklist:
 
-- [ ] Types live in a small module (e.g. `utils/reduction_specs.jl`) included from `coarsening_pipeline.jl` / `dataset_builder_impl.jl`.
-- [ ] JSON/Arrow metadata includes `reduction_kind`, `nh`, `mh`, `nz_blk`, `stride`, `truncation` (see §6).
+- [x] Types live in **`utils/reduction_specs.jl`**; consumed from **`dataset_builder_impl.jl`** (and re-exported patterns via `coarsening_pipeline.jl` where applicable).
+- [~] Arrow metadata: **`reduction_kind`**, **`reduction_nh`**, **`reduction_fz`**, **`truncation_x/y/z`** emitted; **`stride_*` resolved** not always duplicated as columns — see `dataset_builder.jl` schema. Optional future: `native_nx` debug columns (§6).
 
 ---
 
 ## 4. Block reductions — truncated tiling
 
-### 4.1 Horizontal example (user spec)
+### 4.1 Horizontal example (truncation geometry — illustrative)
 
-Domain **124×124** native, `dx = 50 m`, target **≥ 1 km** ⇒ need `nh × 50 m ≥ 1000` ⇒ `nh ≥ 20`. Pick **`nh = 21`**:
+Domain **124×124** native, `dx = 50 m`, target **≥ 1 km** ⇒ **`nh_min = 20`**. The **schedule** may also include **`nh = 124`** (domain scale) and other values from the **{2,3,5}** tower (e.g. 20, 40, 60, …). The example **`nh = 21`** below is **only** a worked truncation illustration (how many cells are used/discarded for a **chosen** block width), **not** a guarantee that **21** appears in the default schedule.
 
-- `⌊124 / 21⌋ = 5` blocks along x → **105** columns used, **19** columns **discarded** (e.g. right edge; document **which edge** — recommend **fixed low-index origin**: use columns `1:105`, discard `106:124`).
+For **`nh = 21`**:
+
+- `⌊124 / 21⌋ = 5` blocks along x → **105** columns used, **19** discarded — **fixed low-index origin**: columns `1:105`, discard `106:124`.
 - Same along y.
 
 ### 4.2 Rules
 
-- [ ] **Origin**: Fixed corner (document: e.g. **start at `(1,1,1)`** in Julia 1-based indices).
-- [ ] **Remainder**: Dropped; **no** renormalization of global means by “fraction of domain.”
-- [ ] **Vertical**: Same idea: `⌊nz / nz_blk⌋` full layers; drop top remainder unless we explicitly choose bottom vs top (pick one and test).
-- [ ] **Schedule**: Build a list of `(nh, mh, nz_blk)` from **physical targets** (`min_h`, `max_dz`, etc.), not from **divisors** of `nx`.
-- [ ] **Chaining / cache**: Prefer **tower** along factors (2×2, 3×3, …) so intermediate scales are reused — **means and moment fields** must use merge rules that match emitted diagnostics (see §7).
+- [x] **Origin**: Fixed low-index corner **`(1,1,1)`** (truncated block / valid-box conventions in `dataset_builder_impl` / `array_utils`).
+- [x] **Remainder**: Dropped; **no** renormalization of global means by “fraction of domain.”
+- [x] **Vertical**: `⌊nz / fz⌋` full layers from bottom; remainder dropped (consistent with `conv3d_block_mean` / vertical coarsen).
+- [x] **Schedule**: Horizontal **`nh`** from **`min_h` + {2,3,5} tower + `nh_max`**; vertical **`fz`** from **divisors of `nz`** with **`fz * dz_ref ≤ max_dz`** — **not** “all divisors of `nx`” for horizontal.
+- [x] **Chaining / cache** (horizontal block path): `_process_abstract_chunk_block_truncated` builds per-`nh` means/products from native or from the largest cached divisor `s | nh` (pool by `nh÷s`); products chain with `coarsen_fields_at_level` on cached `<xy>` fields (not `coarsen_products_at_level`, which expects native field keys). Vertical `fz` is applied per triple after horizontal cache lookup.
 
 ### 4.3 “Largest block nh ≤ N/2” and the hybrid gap
 
@@ -74,10 +102,10 @@ Non-overlapping blocks of size `nh` can only tile at most **`⌊N/nh⌋`** windo
 
 Hybrid default (conceptual):
 
-- [ ] **Phase A — blocks**: Emit all truncated block scales from a **small factor set** (e.g. primes ladder 2,3,5 or user schedule) with **caching**.
-- [ ] **Phase B — sliding**: For each **target Δh** (and Δz) **not** hit by Phase A within tolerance, run sliding local moments on **native** (or on a **fine-enough** cached grid — only if bit-exact equivalence proven).
+- [x] **Phase A — blocks (schedule)**: `truncated_horizontal_sizes` closes `nh_min = ceil(min_h/dx)` under multiply-by-{2,3,5} up to `min(nx,ny)`, then adds `nh_max` if missing (domain scale). No extra `nh_min+1` rung.
+- [x] **Phase B — sliding (operational)**: Hybrid runs **`hybrid_sliding_extra_sizes_default`** (subsampled window sizes **not** already in the block `nh` set, budget **`sliding_window_budget_h`**) × same **`z_factors`** as block schedule; **always from native** fine fields for sliding passes (no block-cache reuse). **Not yet**: explicit “Δh tolerance” planner (e.g. 5%) — current policy is **subsampled extras**, not meter-gap optimization.
 
-Document **tolerance** (e.g. 5% on Δh) in config.
+Document **tolerance** (e.g. 5% on Δh) in config — **future**.
 
 ### 4.4 Default relationship: blocks vs sliding
 
@@ -93,86 +121,87 @@ Document **tolerance** (e.g. 5% on Δh) in config.
 
 For each output cell `(i,j,k)` and window `Wh×Wh×Wz` (square horizontal default):
 
-- [ ] For every **first-order** field `f`: store **local mean** `mean(f)`.
-- [ ] For every **product** needed for covariances / TKE: store **local mean** `mean(f*g)` on the **same window**.
-- [ ] Emit same derived diagnostics as block path (`_covariance_from_moments!`, `_tke_from_moments!`, etc.) **per output cell**.
+- [x] **First-order** fields: local **mean** per valid box (`conv3d_valid_box_mean`, `*_at_starts`).
+- [x] **Products** for covariances / TKE: local **mean of `f*g`** on the same window (`conv3d_valid_box_product_mean`, `*_at_starts`).
+- [x] Same derived diagnostics as block path (`_covariance_from_moments!`, `_tke_from_moments!`, etc.) **per output cell**.
 
 ### 5.2 Naive implementation
 
-- [ ] Six nested loops or equivalent: `for i,j,k` over output, `for di,dj,dk` over window — **correctness reference**.
-- [ ] Unit test: compare to explicit small-grid hand calculation.
+- [x] Correctness: valid-box loops in **`array_utils.jl`**; tests e.g. **`test_array_utils.jl`**, **`test_dataset_builder_impl`** / pipeline tests.
+- [~] Standalone “hand-derived micro-grid” reference test for sliding — optional tighten-up.
 
 ### 5.3 Performance (iterative checklist)
 
 - [ ] **Thread** over output `i` or `(i,j)` tiles.
-- [ ] **Contiguous memory**: ensure arrays are column-major friendly.
-- [ ] **Precompute** `inv(window_volume)` once per scale.
+- [x] **Contiguous memory**: column-major 3D arrays; preallocated scratch in hot paths where done.
+- [x] **Precompute** `inv(window_volume)` where applicable in box kernels.
 - [ ] Consider **separable horizontal** box filter = two passes 1×Wh and Wh×1 (exact for mean; verify for **products** — `mean(f*g)` is **not** separable unless approximated; **must not** use separable trick for cross-moment without proof). *Default: full 3D box for products.*
 - [ ] Optional: **FFT / imfilter** only where exact equivalence holds (likely **means only**); document if used.
 
 ### 5.4 Boundaries
 
-- [ ] **Valid** convolution only (shrink output) for v1 — matches “no ghost / no periodic” spirit of block truncation.
-- [ ] Document output sizes: for stride `s`, horizontal extent is `⌊(nx − Wh) / s⌋ + 1` (and analogously `y`, `z`) when `nx ≥ Wh`; zero outputs if `nx < Wh`.
+- [x] **Valid** box only (no padding / ghost) — matches block truncation spirit.
+- [x] Output sizes: **`valid_box_output_extent`**, **`uniform_stride_for_valid_box`** docstrings; anchor path uses **explicit start indices** (`valid_box_anchor_starts`).
 
 ### 5.5 Stride / output-count defaults (sparse coverage)
 
-**Goal:** Few origins, large effective step — **tiny shifts of the window add little information** relative to the volume of LES data; stride-1 output grids are **quadratic** in domain extent and are **not** the default.
+**Goal:** Few origins — stride-1 output grids are **not** the default.
 
-- [ ] Expose a **target output count per axis** `K` (default **`2`**: first valid window at the **low-index** origin, last aligned toward the **far edge** — e.g. `Wh = 70`, `nx = 124` ⇒ stride `54` ⇒ **2** starts along `x`).
-- [ ] **User override:** explicit integer **strides** `stride_h`, `stride_v`, `stride_z` (or env / `spatial_info`) for **overlap** or **gaps**.
-- [ ] **Divisibility / `K > 2`:** Prefer **approximately even coverage** of the domain along each axis. Use a **simple rule**: derive a **floating** ideal spacing `(nx − Wh) / (K − 1)`, map to **integer stride** by **rounding** (document whether `round` / `floor` / `ceil`), then **adjust** so the realized output count **never exceeds `K`** (avoid extra work — **more than `K` outputs is unacceptable** for the default budget). Small **asymmetry** at the right/top edge is acceptable if it preserves the output cap and near-uniform spacing.
-- [ ] Record resolved strides and target `K` in metadata (§6).
+- [x] **Target count `K` per axis**: `sliding_outputs_h|v|z` (default **2**), env **`MLCD_SLIDING_OUTPUTS_*`**.
+- [x] **User override:** **`sliding_stride_h|v|z`** in `spatial_info` → **`uniform_stride_for_valid_box`**-style strided valid box (integer stride; see `array_utils` / `_resolve_sliding_strides` in `dataset_builder_impl`).
+- [x] **Default when strides not explicit:** **`valid_box_anchor_starts`**: first start **1**, last start **`n − window + 1`**, interior via integer spacing; **length `min(K, L)`** if only **`L`** valid placements exist (single-tile domain).
+- [~] **`uniform_stride_for_valid_box`**: caps outputs ≤ `K` but **does not** force far-edge flush when `(n−window)` not divisible by `K−1` — documented in `array_utils.jl`; **anchor** path is default for “corners + exact `K` when possible.”
+- [ ] Record **resolved** strides / anchor lists in Arrow metadata (optional future; truncation fields exist for blocks).
 
 ### 5.6 Window-size schedule (avoid enumerating every width)
 
-Enumerating **every** horizontal window size from **`⌊N/2⌋` to `N−1`** (e.g. **65…123** on **124×124**) is **another quadratic-style blow-up**. **Block reductions** already fill many scales; sliding/convolution should **not** repeat that enumeration by default.
+Enumerating **every** horizontal window size is **not** the default.
 
-- [ ] Add a configurable **budget** of window sizes (default on the order of **`5`**, linearly or **evenly spaced** in index space between a **minimum** from physics (`min_h`, `dx`, `min_dz` / `dz_ref`) and a **maximum** (e.g. `min(nx, ny)` or policy “below full domain” so blocks own the largest non-overlapping scales).
-- [ ] Apply the same idea to **pure convolution / sliding modes** that iterate over window sizes: **default = subsampled schedule**, not all integers.
-- [ ] **Override:** user supplies an explicit list of `(Wh, Wz)` or triples when they need full coverage.
+- [x] **Budget** **`sliding_window_budget_h`** (default **5**): **`sliding_reduction_triples`**, **`hybrid_sliding_extra_sizes_default`** — subsampled **`nh`** / **`Wh`** between physics min and **`min(nx,ny)`**.
+- [x] **Pure `:sliding` mode** uses **`sliding_reduction_triples`** (budgeted), not every integer width.
+- [x] **Override:** explicit **`block_triples`** for block path; sliding still uses schedule from **`sliding_reduction_triples`** unless extended later.
 
 ---
 
 ## 6. Metadata & training contract
 
-Every emitted row / column group must record:
+Emitted columns (see **`SCHEMA_SYMBOL_ORDER`** in `dataset_builder.jl`):
 
-- [ ] `reduction_kind`: `:block_truncated` | `:sliding_valid` | `:hybrid_block` | `:hybrid_sliding`
-- [ ] `nh`, `mh`, `nz_blk` **or** `window_h`, `window_z`, `stride` — plus optional `sliding_outputs_h` / resolved stride after subsampling policy
-- [ ] `resolution_h`, `resolution_z` (physical, as today)
-- [ ] `truncation_x`, `truncation_y`, `truncation_z` (counts dropped)
-- [ ] `native_nx`, `native_ny`, `native_nz` (for debugging)
+- [x] **`reduction_kind`** (string): **`"block_truncated"`** (block and hybrid **block** phase), **`"sliding_valid"`** (pure sliding), **`"hybrid_sliding"`** (hybrid **extra** sliding passes). **`flatten_and_filter!`** default placeholder **`"hybrid"`** if callers omit (e.g. profiling helpers).
+- [x] **`reduction_nh`**, **`reduction_fz`**, **`truncation_x`**, **`truncation_y`**, **`truncation_z`**
+- [x] **`resolution_h`**, **`resolution_z`**, **`domain_h`**
+- [ ] **`native_nx`, `native_ny`, `native_nz`**, explicit **`stride_*`** columns — **not** in schema yet (debug / future).
 
-Ensure **dataset readers** and **train scripts** tolerate new fields / enum values.
+Ensure **dataset readers** and **train scripts** tolerate **`reduction_kind`** string values above.
 
 ---
 
 ## 7. Math — merging for towers (block path only)
 
-- [ ] **Means**: composable under disjoint refinement (same block sizes).
-- [ ] **Variances / covariances / TKE**: require **sufficient statistics** per node (`n`, means, mean products, etc.) if merging coarse blocks into coarser without returning to native — mirror existing moment pipeline.
-- [ ] **Proof sketch / citation** in docstrings (Chan/Welford / parallel merge).
-- [ ] **Non-binary factors**: merging 3 or 4 children = repeated pairwise merge or single k-way formula — pick one implementation style and test.
+- [x] **Means / mean products**: horizontal tower uses **sequential box pooling** from native or parent scale; **equivalent** to one-shot `nh×nh` mean when dimensions divide (validated by construction; spot tests in pipeline tests).
+- [x] **Non-binary horizontal factors**: **integer ratios** `r = nh / best_src` from cached scale; vertical **`fz`** applied after horizontal cache.
+- [ ] **Formal proof / Chan–Welford** in docstrings for merge algebra — still **nice-to-have**.
+- [ ] **k-way merge** in one kernel vs repeated 2-way — **not** required for current schedule.
 
-Sliding path: **no merge** across windows at different origins (unless future “integral images” / summed-area tables for box filters on **means** only — optional future work).
+Sliding path: **no merge** across origins; block and sliding caches **not** shared.
 
 ---
 
 ## 8. Migration from `coarsening_mode`
 
-| Current | Target |
-|---------|--------|
-| `:binary` | Deprecated alias → `BlockReductionSpec` with **legacy schedule** (seed ladder + vertical ×2) until tests pass on new tower |
-| `:convolutional` | Remove “all divisors from native” behavior; either map to `BlockReductionSpec` + truncated tiling **or** `SlidingConvolutionSpec` per user choice |
-| `MLCD_COARSENING_MODE` | Replace with e.g. `MLCD_REDUCTION_MODE=block|sliding|hybrid` + JSON or separate env for schedules |
-| `TabularBuildOptions` | Add `reduction_spec` or flattened fields; keep `tabular_build_options_from_env` merge pattern |
+| Previous | **Shipped (2026)** |
+|----------|---------------------|
+| `:binary`, `:convolutional`, legacy symbols | **`ArgumentError`** in `process_abstract_chunk_impl` with text pointing to **`:hybrid`**, **`:block`**, **`:sliding`** and **`block_triples`**. |
+| `MLCD_COARSENING_MODE=binary|convolutional|…` | **`@warn` once** ( **`maxlog=1`** ) and treat as **`:hybrid`** in `tabular_build_options_from_env` — user should fix env. |
+| `convolutional_triples`, `convolutional_square_horizontal` | Use **`block_triples`**, **`block_square_horizontal`** (legacy horizontal key still read as fallback). |
+| `MLCD_REDUCTION_MODE` rename | **Not done** — still **`MLCD_COARSENING_MODE`**; rename optional. |
+| `TabularBuildOptions` | **`coarsening_mode`**, **`sliding_outputs_*`**, **`sliding_window_budget_h`**; **`tabular_build_options_from_env(; kw...)`** merge pattern. |
 
 Checklist:
 
-- [ ] Grep entire repo for `coarsening_mode`, `convolutional`, `binary` in `spatial_info`.
-- [ ] Update `dataset_spec.md` / README snippets if they mention old modes.
-- [ ] Deprecation warnings for one release cycle.
+- [~] Grep **`experiments/`**, **`docs/`**, **`README`**, **`dataset_spec.md`** for stale **`binary` / `convolutional`** instructions — **ongoing** hygiene.
+- [x] Tests updated to **`:hybrid`** / **`:block`** where applicable.
+- [x] **Deprecation**: legacy env warns; in-process **`:binary` / `:convolutional`** **hard error** (no silent alias in `spatial_info`).
 
 ---
 
@@ -180,73 +209,71 @@ Checklist:
 
 ### Phase 0 — Spec & scaffolding
 
-- [ ] Land this doc; team sign-off on **truncation corner**, **sparse stride / output-count defaults** (§5.5), and **window-size budget** (§5.6).
-- [ ] Introduce `AbstractReductionSpec` + structs **without** wiring full pipeline.
-- [ ] Add **no-op** or stub dispatch that errors with clear message.
+- [x] This doc + team norms for truncation / sparse defaults (evolved in code).
+- [x] **`AbstractReductionSpec` + structs** in **`reduction_specs.jl`**.
+- [~] **Single `process_chunk(::AbstractReductionSpec)`** entrypoint — **not** done; symbolic routing remains.
 
 ### Phase 1 — Block truncated tiling (means only POC)
 
-- [ ] Implement truncated crop + non-overlapping mean for **one** field.
-- [ ] Tests: 124×124, `nh=21` → inner size 5×5; remainder 19 discarded.
-- [ ] Extend to full `fields` NamedTuple and **one** scale in `process_abstract_chunk`.
+- [x] Superseded by full block path (all fields + diagnostics).
 
 ### Phase 2 — Full diagnostics on block truncated path
 
-- [ ] Wire products, cloud mask, flatten to Arrow — match existing column schema.
-- [ ] Performance: optional tower cache for means + moments.
+- [x] Products, masks, **`flatten_and_filter!`**, Arrow schema — **shipped**.
+- [x] **Horizontal tower cache** for means + **product** fields (`_block_truncated_horizontal_cache!`).
 
 ### Phase 3 — Sliding naive + tests
 
-- [ ] Implement §5.1–5.2; parity tests on tiny grids vs brute force.
-- [ ] Document output shape vs block path.
+- [x] Valid-box kernels + tests (`test_array_utils`, pipeline / dataset tests).
+- [x] **`valid_box_anchor_starts`** + **`conv3d_valid_box_*_at_starts`** as default sparse placement.
 
 ### Phase 4 — Sliding fast
 
-- [ ] §5.3 items; benchmark vs Phase 3 on realistic size.
+- [ ] Threading / separable / FFT — **open** (§5.3).
 
 ### Phase 5 — Hybrid default
 
-- [ ] Implement `HybridReductionSpec` planner: choose block scales + sliding scales from `min_h`, `max_dz`, tolerances.
-- [ ] Make **hybrid** the default in `tabular_build_options_from_env`.
-- [ ] Integration test: one LES slice (or mocked data) end-to-end.
+- [x] **Hybrid** orchestration in **`_process_abstract_chunk_hybrid`**.
+- [x] Default **`coarsening_mode = :hybrid`** and env default **`hybrid`**.
+- [~] **Planner with explicit Δh tolerance** — **not** implemented; subsampled extras only.
 
 ### Phase 5b — Sparse sliding + window budgets (operational defaults)
 
-- [x] Implement §5.5–5.6: `uniform_stride_for_valid_box` in [`utils/array_utils.jl`](utils/array_utils.jl); `_resolve_sliding_strides` + `spatial_info` / `TabularBuildOptions` (`sliding_outputs_*`, `sliding_window_budget_h`, env `MLCD_SLIDING_*`); explicit `sliding_stride_*` overrides auto stride.
-- [x] Subsample sliding **window sizes**: [`sliding_reduction_triples`](utils/reduction_specs.jl), [`hybrid_sliding_extra_sizes_default`](utils/reduction_specs.jl) vs block ladder; `sliding_window_budget_h` (default 5).
-- [ ] Regression / perf test: large `nx`, `ny` shows **linear** scaling in domain size for default sliding cost vs stride-1 baseline.
+- [x] **`uniform_stride_for_valid_box`**, **`valid_box_anchor_starts`**, **`_resolve_sliding_strides`**, **`MLCD_SLIDING_*`**, explicit **`sliding_stride_*`**.
+- [x] **`sliding_reduction_triples`**, **`hybrid_sliding_extra_sizes_default`**, **`sliding_window_budget_h`**.
+- [ ] Regression / perf test: large `nx`, `ny` **linear** default sliding cost vs stride-1 baseline.
 
 ### Phase 6 — Deprecate & delete legacy
 
-- [ ] Redirect `:binary` / old `:convolutional` to new specs; remove divisor enumerator.
-- [ ] Clean docs; close tickets.
+- [x] **Remove** user-facing **`:binary` / `:convolutional`** paths; **env** legacy → warn + **hybrid**.
+- [~] Repo-wide doc grep for old names — **ongoing**.
 
 ---
 
 ## 10. Testing checklist (always-on)
 
-- [ ] **Truncation**: remainder sizes 0, 1, `nh-1`, `nh`, `N-1`.
-- [ ] **Prime / composite** `nx` — block schedule still defined by physics, not divisibility.
-- [ ] **Sliding**: stride 1 valid (reference / opt-in dense mode); compare means/products to reference.
-- [ ] **Sparse sliding**: default `K = 2` matches hand-computed corner windows; `K > 2` respects **≤ K** outputs and approximate spacing.
-- [ ] **Window schedule**: default budget yields **≤ configured** distinct `Wh` (and `Wz`) values.
-- [ ] **Regression**: snapshot row counts for a fixed small case (or tolerance on statistics).
-- [ ] **Thread safety** (if threaded): same results as serial.
+- [~] **Truncation**: covered indirectly; **exhaustive** remainder matrix (0, 1, `nh-1`, …) **optional** expansion.
+- [x] **Schedule**: **`truncated_horizontal_sizes`** / **`block_reduction_triples`** tests in **`test_reduction_specs.jl`**.
+- [x] **Sliding / anchors**: **`test_array_utils.jl`** (`valid_box_anchor_starts`, `uniform_stride_for_valid_box`, conv vs brute force).
+- [x] **Sparse sliding**: **`K` cap** when `L=1` valid placement (`valid_box_anchor_starts`); hybrid / dataset tests pass.
+- [x] **Window budget**: **`sliding_reduction_triples`** length ≤ budget test.
+- [x] **Regression**: **`test_dataset_builder.jl`**, **`test_dataset_builder_impl.jl`**, **`test_data_hygiene.jl`**, etc.
+- [ ] **Thread safety**: when threading is added to hot loops — **N/A** until then.
 
 ---
 
-## 11. Open questions (resolve before Phase 5)
+## 11. Open questions / follow-ups
 
-- [ ] **Vertical sliding**: independent 1D along z or full 3D window? (Recommend full 3D for consistency with moments.)
-- [ ] **Hybrid planner**: exact rule for “gap” — absolute meters vs relative to `dx*nh`?
-- [ ] **cfSites** path: same reducer specs or separate defaults?
-- [ ] **Arrow duplication**: hybrid may emit **two** rows for “similar” Δh from block vs sliding — deduplicate in planner or keep both with distinct `reduction_kind`?
+- [x] **Vertical sliding**: **full 3D** valid box for means/products in **`dataset_builder_impl`** sliding/hybrid paths.
+- [ ] **Hybrid planner**: replace subsampled extras with **explicit Δh / Δz gap** rule (meters or relative)?
+- [ ] **cfSites** path: parity review vs GoogleLES **`spatial_info`** defaults.
+- [ ] **Arrow duplication**: hybrid can emit **similar** `resolution_h` from block vs sliding — keep **`reduction_kind`** distinct or dedupe in planner?
 
-**Defaults (Phase 5b — implemented in code, see `dataset_builder_impl` + `reduction_specs`):**
+**Defaults (Phase 5b — in code, `dataset_builder_impl` + `reduction_specs` + `array_utils`):**
 
-- Prefer **block** for non-overlapping scales; **sparse sliding** when overlap/gaps or **large windows** demand it; **default `K = 2`** origins per axis unless configured otherwise.
-- **`K > 2`:** even spacing with **integer stride rounding**, **never more than `K` outputs**; slight edge asymmetry OK.
-- **Window sizes:** default **~5** evenly spaced candidates — not every integer; **block path** fills most scales operationally.
+- **Block-first** hybrid; **sparse sliding** for extra window sizes; default **`K = 2`** per axis via **`sliding_outputs_*`** when strides not explicit.
+- **Anchor path**: corner-preserving **`valid_box_anchor_starts`**; **`uniform_stride_for_valid_box`** when **`sliding_stride_*`** set (different edge semantics — see §5.5).
+- **Window sizes:** budgeted **`sliding_window_budget_h`**; horizontal block scales from **{2,3,5}** tower + **`nh_max`**.
 
 ---
 
@@ -261,4 +288,4 @@ Checklist:
 
 ---
 
-*Last updated: added terabyte-scale defaults — sparse strides (§5.5), subsampled window schedules (§5.6), block-first vs sliding (§4.4), Phase 5b.*
+*Last updated: 2026-04 — §0 progress snapshot; goals/phases/migration aligned with shipped `DatasetBuilderImpl`, `reduction_specs`, `array_utils`; clarified §4.1 example vs schedule; block horizontal cache + {2,3,5} tower; legacy mode removal + env behavior; checkbox pass throughout.*

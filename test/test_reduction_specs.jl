@@ -9,6 +9,17 @@ Test.@testset "ReductionSpecs truncated extent (124 × nh=21)" begin
     Test.@test disc == 19
 end
 
+Test.@testset "ReductionSpecs truncated_horizontal_sizes factor tower (2,3,5) + nh_max" begin
+    nhs124 = truncated_horizontal_sizes(124, 124, 50.0f0, 1000.0f0)
+    Test.@test 20 in nhs124
+    Test.@test 124 in nhs124
+    Test.@test !(21 in nhs124)
+    nhs120 = truncated_horizontal_sizes(120, 120, 50.0f0, 1000.0f0)
+    Test.@test 60 in nhs120
+    Test.@test 100 in nhs120
+    Test.@test 120 in nhs120
+end
+
 Test.@testset "ReductionSpecs block_reduction_triples uses truncated tiling counts" begin
     nx, ny, nz = 124, 124, 8
     dx = 50.0f0
@@ -17,8 +28,8 @@ Test.@testset "ReductionSpecs block_reduction_triples uses truncated tiling coun
     max_dz = 400.0f0
     triples = block_reduction_triples(nx, ny, nz, dx, min_h, dz_ref, max_dz)
     Test.@test !isempty(triples)
-    has_21 = any(t -> t[1] == 21 && t[2] == 21, triples)
-    Test.@test has_21
+    Test.@test any(t -> t[1] == 124 && t[2] == 124, triples)
+    Test.@test any(t -> t[1] == 20 && t[2] == 20, triples)
 end
 
 Test.@testset "ReductionSpecs subsample_closed_range" begin

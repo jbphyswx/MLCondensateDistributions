@@ -366,6 +366,47 @@ function process_abstract_chunk_impl(
 end
 
 
+"""
+Build horizontally coarsened means/products for every `nh` appearing in `triples`, reusing the
+largest cached divisor `s | nh` and pooling by `nh÷s` (same idea as `build_horizontal_multilevel_views`).
+Vertical `fz` is applied later per triple via `coarsen_*_vertical_at_level`.
+"""
+function _block_truncated_horizontal_cache!(
+    means_h::Dict{Int, NamedTuple},
+    prods_h::Dict{Int, NamedTuple},
+    fields::NamedTuple,
+    product_pairs::NamedTuple,
+    triples::Vector{NTuple{3,Int}},
+)
+    nhs = sort!(unique!(Int[t[1] for t in triples]))
+    done = Int[]
+    for nh in nhs
+        best_src = 0
+        for s in done
+            if rem(nh, s) == 0 && s > best_src
+                best_src = s
+            end
+        end
+        means = if best_src == 0
+            CoarseningPipeline.coarsen_fields_at_level(fields, nh, nh)
+        else
+            r = div(nh, best_src)
+            CoarseningPipeline.coarsen_fields_at_level(means_h[best_src], r, r)
+        end
+        prods = if best_src == 0
+            CoarseningPipeline.coarsen_products_at_level(fields, product_pairs, nh, nh)
+        else
+            r = div(nh, best_src)
+            # Cached entries are already `<x*y>` means; pool them horizontally like plain fields.
+            CoarseningPipeline.coarsen_fields_at_level(prods_h[best_src], r, r)
+        end
+        means_h[nh] = means
+        prods_h[nh] = prods
+        push!(done, nh)
+    end
+    return nothing
+end
+
 function _process_abstract_chunk_block_truncated(
     fields::NamedTuple,
     product_pairs::NamedTuple,
@@ -400,11 +441,26 @@ function _process_abstract_chunk_block_truncated(
     else
         Vector{NTuple{3,Int}}(collect(explicit_block))
     end
+    square_triples = all(t -> t[1] == t[2], triples)
+    means_h = Dict{Int, NamedTuple}()
+    prods_h = Dict{Int, NamedTuple}()
+    if square_triples
+        _block_truncated_horizontal_cache!(means_h, prods_h, fields, product_pairs, triples)
+    end
     future_z_empty = Int[]
     out_acc = nothing
     for (fx, fy, fz) in triples
-        means = coarsen_fields_3d_block(fields, fx, fy, fz)
-        prods = coarsen_products_3d_block(fields, product_pairs, fx, fy, fz)
+        means, prods = if square_triples
+            (
+                CoarseningPipeline.coarsen_fields_vertical_at_level(means_h[fx], fz),
+                CoarseningPipeline.coarsen_products_vertical_at_level(prods_h[fx], fz),
+            )
+        else
+            (
+                coarsen_fields_3d_block(fields, fx, fy, fz),
+                coarsen_products_3d_block(fields, product_pairs, fx, fy, fz),
+            )
+        end
         c_qt = _field_get(means, :hus)
         c_h = _field_get(means, :thetali)
         c_ta = _field_get(means, :ta)

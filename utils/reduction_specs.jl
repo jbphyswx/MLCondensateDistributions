@@ -76,25 +76,39 @@ end
 """
     truncated_horizontal_sizes(nx, ny, dx, min_h) -> Vector{Int}
 
-Geometric ladder from `nh_min = ceil(min_h/dx)` doubling until `min(nx,ny)`, plus `nh_min+1`
-when it fits (doc example: `min_h/dx = 20` ⇒ include both 20 and 21 for truncated tiling).
+Horizontal block widths in **cells** (square `nh×nh`) for truncated block coarsening.
+
+Schedule (see `docs/COARSENING_REDUCTION_IMPLEMENTATION_PLAN.md` §4.3):
+
+- Start at `nh_min = ceil(min_h/dx)`.
+- Close under multiplication by **2, 3, and 5** while `nh ≤ min(nx,ny)` (breadth-first on the factor monoid).
+- Always include **`nh_max = min(nx,ny)`** if not already reached (full horizontal tile / domain scale).
+
+This yields non-binary horizontal coverage (e.g. 20 → 40 → 60 → …) without the old `nh_min+1` extra rung.
 """
 function truncated_horizontal_sizes(nx::Int, ny::Int, dx::T, min_h::T) where {T <: Real}
     nh_max = min(nx, ny)
-    nh0 = max(1, ceil(Int, min_h / dx))
-    nh0 > nh_max && return Int[nh_max]
-    out = Int[]
-    n = nh0
-    while n <= nh_max
-        push!(out, n)
-        n == nh_max && break
-        n = min(nh_max, n * 2)
+    nh_min = max(1, ceil(Int, min_h / dx))
+    nh_min > nh_max && return Int[nh_max]
+    reached = Set{Int}()
+    queue = Int[nh_min]
+    push!(reached, nh_min)
+    i = 1
+    while i <= length(queue)
+        s = queue[i]
+        i += 1
+        for p in (2, 3, 5)
+            sn = s * p
+            if sn <= nh_max && !(sn in reached)
+                push!(reached, sn)
+                push!(queue, sn)
+            end
+        end
     end
-    if nh0 + 1 <= nh_max
-        push!(out, nh0 + 1)
+    if nh_max ∉ reached
+        push!(reached, nh_max)
     end
-    sort!(unique!(out))
-    return out
+    return sort!(collect(reached))
 end
 
 """
