@@ -13,10 +13,13 @@ export AbstractReductionSpec,
     truncated_block_extent,
     crop_ranges_3d,
     truncated_horizontal_sizes,
+    effective_fz_max,
+    vertical_block_factors_from_tower,
     block_reduction_triples,
     sliding_reduction_triples,
     subsample_closed_range,
     hybrid_sliding_extra_sizes_default,
+    hybrid_sliding_extra_vertical_default,
     default_hybrid_sliding_windows,
     merge_reduction_metadata
 
@@ -74,48 +77,133 @@ function crop_ranges_3d(nx::Int, ny::Int, nz::Int, nxu::Int, nyu::Int, nzu::Int)
 end
 
 """
-    truncated_horizontal_sizes(nx, ny, dx, min_h) -> Vector{Int}
+    effective_fz_max(nz, dz_ref, max_dz) -> Int
 
-Horizontal block widths in **cells** (square `nh×nh`) for truncated block coarsening.
-
-Schedule (see `docs/COARSENING_REDUCTION_IMPLEMENTATION_PLAN.md` §4.3):
-
-- Start at `nh_min = ceil(min_h/dx)`.
-- Close under multiplication by **2, 3, and 5** while `nh ≤ min(nx,ny)` (breadth-first on the factor monoid).
-- Always include **`nh_max = min(nx,ny)`** if not already reached (full horizontal tile / domain scale).
-
-This yields non-binary horizontal coverage (e.g. 20 → 40 → 60 → …) without the old `nh_min+1` extra rung.
+Largest integer `fz` in `1:nz` with `fz * dz_ref ≤ max_dz` (same rule as the legacy divisor loop).
+Returns `0` if no such `fz` exists.
 """
-function truncated_horizontal_sizes(nx::Int, ny::Int, dx::T, min_h::T) where {T <: Real}
-    nh_max = min(nx, ny)
-    nh_min = max(1, ceil(Int, min_h / dx))
-    nh_min > nh_max && return Int[nh_max]
-    reached = Set{Int}()
-    queue = Int[nh_min]
-    push!(reached, nh_min)
-    i = 1
-    while i <= length(queue)
-        s = queue[i]
-        i += 1
-        for p in (2, 3, 5)
-            sn = s * p
-            if sn <= nh_max && !(sn in reached)
-                push!(reached, sn)
-                push!(queue, sn)
-            end
+function effective_fz_max(nz::Int, dz_ref::T, max_dz::T) where {T <: Real}
+    nz < 1 && return 0
+    f = 0
+    @inbounds for fz in 1:nz
+        (fz * dz_ref <= max_dz) || break
+        f = fz
+    end
+    return f
+end
+
+function _primes_asc_up_to(n::Int)::Vector{Int}
+    n < 2 && return Int[]
+    is_comp = falses(n)
+    sqrtn = isqrt(n)
+    @inbounds for p in 2:sqrtn
+        is_comp[p] && continue
+        q = p * p
+        while q <= n
+            is_comp[q] = true
+            q += p
         end
     end
-    if nh_max ∉ reached
-        push!(reached, nh_max)
+    out = Int[]
+    @inbounds for p in 2:n
+        is_comp[p] || push!(out, p)
     end
-    return sort!(collect(reached))
+    return out
+end
+
+function _vertical_tower_dfs!(out::Set{Int}, fz_eff::Int, nzc::Int, fz_max::Int)
+    nzc < 2 && return nothing
+    for p in _primes_asc_up_to(nzc)
+        div(nzc, p) < 1 && continue
+        fz_child = fz_eff * p
+        fz_child > fz_max && continue
+        push!(out, fz_child)
+        nzc_child = div(nzc, p)
+        _vertical_tower_dfs!(out, fz_child, nzc_child, fz_max)
+    end
+    return nothing
 end
 
 """
-    block_reduction_triples(nx, ny, nz, dx, min_h, dz_ref, max_dz; square_horizontal=true)
+    vertical_block_factors_from_tower(nz, dz_ref, max_dz; vertical_budget=5)
 
-All `(nh, nh, fz)` (or `(nh, mh, fz)` if `square_horizontal` false — not implemented) where
-`nh` comes from [`truncated_horizontal_sizes`](@ref) and `fz` divides `nz` with `fz * dz_ref <= max_dz`.
+Vertical **block** factors `fz` (native layers per coarse layer), mirroring the horizontal tower:
+
+- `fz_max = effective_fz_max(nz, dz_ref, max_dz)`.
+- **Seeds** in `1 : ⌊fz_max/2⌋` (or `1:fz_max` if that range is empty), subsampled with `vertical_budget`
+  (or full range if `vertical_budget === nothing`).
+- **Tower:** from each seed, prime-sized **1D** pooling steps along `z` on the truncated coarse grid
+  (`⌊nz/fz⌋` coarse levels after grouping by `fz`), while `fz_eff * p ≤ fz_max`.
+
+Sorted distinct integers. Empty if `fz_max == 0`.
+"""
+function vertical_block_factors_from_tower(
+    nz::Int,
+    dz_ref::T,
+    max_dz::T;
+    vertical_budget::Union{Nothing,Int} = 5,
+)::Vector{Int} where {T <: Real}
+    fz_max = effective_fz_max(nz, dz_ref, max_dz)
+    fz_max < 1 && return Int[]
+    out = Set{Int}()
+    fz_half = fld(fz_max, 2)
+    seeds = if fz_half >= 1
+        vertical_budget === nothing ? collect(1:fz_half) :
+        subsample_closed_range(1, fz_half, vertical_budget)
+    else
+        vertical_budget === nothing ? collect(1:fz_max) :
+        subsample_closed_range(1, fz_max, vertical_budget)
+    end
+    isempty(seeds) && push!(seeds, 1)
+    for fz0 in seeds
+        fz0 < 1 && continue
+        fz0 > fz_max && continue
+        nzu = div(nz, fz0) * fz0
+        nzu < fz0 && continue
+        nzc = div(nzu, fz0)
+        push!(out, fz0)
+        _vertical_tower_dfs!(out, fz0, nzc, fz_max)
+    end
+    return sort!(collect(out))
+end
+
+"""
+    truncated_horizontal_sizes(nx, ny, dx, min_h; horizontal_budget=5) -> Vector{Int}
+
+Horizontal block widths in **cells** (square `nh×nh`) for truncated block coarsening.
+
+- `nh_min = ceil(min_h/dx)`, `nh_max = min(nx, ny)`.
+- **Default (`horizontal_budget` an `Int ≥ 1`):** up to that many values, evenly subsampled in
+  `[nh_min, nh_max]` via [`subsample_closed_range`](@ref) — same cost idea as sliding window budgets
+  (avoids very large default work when `N_h = nh_max - nh_min + 1` is big).
+- **`horizontal_budget === nothing`:** every integer `nh_min:nh_max` (research / small domains).
+
+To request the full ladder without `nothing`, set `horizontal_budget` ≥ `nh_max - nh_min + 1`
+(`subsample_closed_range` then returns the whole range).
+
+**Tower / cost:** `_block_truncated_horizontal_cache!` reuses the largest cached `s | nh` and pools
+by `nh÷s` when possible.
+"""
+function truncated_horizontal_sizes(
+    nx::Int,
+    ny::Int,
+    dx::T,
+    min_h::T;
+    horizontal_budget::Union{Nothing,Int} = 5,
+) where {T <: Real}
+    nh_max = min(nx, ny)
+    nh_min = max(1, ceil(Int, min_h / dx))
+    nh_min > nh_max && return Int[nh_max]
+    horizontal_budget === nothing && return collect(nh_min:nh_max)
+    horizontal_budget < 1 && throw(ArgumentError("horizontal_budget must be ≥ 1 or nothing"))
+    return subsample_closed_range(nh_min, nh_max, horizontal_budget)
+end
+
+"""
+    block_reduction_triples(nx, ny, nz, dx, min_h, dz_ref, max_dz; square_horizontal=true, horizontal_budget=5)
+
+All `(nh, nh, fz)` where `nh` comes from [`truncated_horizontal_sizes`](@ref) and each `fz` comes from
+[`vertical_block_factors_from_tower`](@ref) with `vertical_budget = horizontal_budget`.
 """
 function block_reduction_triples(
     nx::Int,
@@ -126,14 +214,14 @@ function block_reduction_triples(
     dz_ref::T,
     max_dz::T;
     square_horizontal::Bool = true,
+    horizontal_budget::Union{Nothing,Int} = 5,
 )::Vector{NTuple{3,Int}} where {T <: Real}
-    nhs = truncated_horizontal_sizes(nx, ny, dx, min_h)
+    nhs = truncated_horizontal_sizes(nx, ny, dx, min_h; horizontal_budget)
+    fzs = vertical_block_factors_from_tower(nz, dz_ref, max_dz; vertical_budget = horizontal_budget)
     triples = NTuple{3,Int}[]
     for nh in nhs
         if square_horizontal
-            for fz in 1:nz
-                mod(nz, fz) != 0 && continue
-                fz * dz_ref > max_dz && continue
+            for fz in fzs
                 push!(triples, (nh, nh, fz))
             end
         end
@@ -167,9 +255,10 @@ end
 """
     sliding_reduction_triples(nx, ny, nz, dx, min_h, dz_ref, max_dz; horizontal_budget=5)
 
-Like [`block_reduction_triples`](@ref) but horizontal window sizes are **subsampled** to at
-most `horizontal_budget` values evenly spaced between `ceil(min_h/dx)` and `min(nx,ny)`,
-instead of the full geometric ladder (keeps sliding-only mode cheap on large domains).
+Horizontal window sizes are **subsampled** to at most `horizontal_budget` values in
+`[ceil(min_h/dx), min(nx,ny)]`. Vertical window heights `fz` are **subsampled** to at most
+`horizontal_budget` values in `[1, effective_fz_max(nz, dz_ref, max_dz)]` (no divisor requirement;
+valid-box coarsening truncates like block means).
 """
 function sliding_reduction_triples(
     nx::Int,
@@ -186,12 +275,12 @@ function sliding_reduction_triples(
     nh_min = max(1, ceil(Int, min_h / dx))
     nh_max = min(nx, ny)
     whs = subsample_closed_range(nh_min, nh_max, horizontal_budget)
+    fz_max = effective_fz_max(nz, dz_ref, max_dz)
+    fzs = fz_max >= 1 ? subsample_closed_range(1, fz_max, horizontal_budget) : Int[]
     triples = NTuple{3,Int}[]
     for wh in whs
         if square_horizontal
-            for fz in 1:nz
-                mod(nz, fz) != 0 && continue
-                fz * dz_ref > max_dz && continue
+            for fz in fzs
                 push!(triples, (wh, wh, fz))
             end
         end
@@ -206,7 +295,9 @@ end
 
 Horizontal window sizes for hybrid **sliding** passes: up to `budget` subsampled sizes in
 `[nh_min, nh_max]` that are **not** already covered by block reductions (`block_nhs`). If
-that set is empty, falls back to [`default_hybrid_sliding_windows`](@ref).
+that set is empty and the block schedule already covers **every** `nh` in `nh_min:nh_max`,
+returns **no** extras (dense block ladder — sliding gap-fill not needed). Otherwise falls back
+to [`default_hybrid_sliding_windows`](@ref) (sparse block schedules only).
 """
 function hybrid_sliding_extra_sizes_default(
     nx::Int,
@@ -224,7 +315,43 @@ function hybrid_sliding_extra_sizes_default(
     if !isempty(extra)
         return extra
     end
-    return default_hybrid_sliding_windows(nx, ny, dx, min_h)
+    if nh_min <= nh_max && all(n -> n in block_nhs, nh_min:nh_max)
+        return Int[]
+    end
+    fb = default_hybrid_sliding_windows(nx, ny, dx, min_h)
+    return filter(w -> !(w in block_nhs), fb)
+end
+
+"""
+    hybrid_sliding_extra_vertical_default(nz, dz_ref, max_dz, block_fzs; budget=5)
+
+Vertical window heights for hybrid **sliding** passes: up to `budget` subsampled integers in
+`[⌊fz_max/2⌋ + 1, fz_max]` (with `fz_max = effective_fz_max(...)`) that are **not** in `block_fzs`.
+If that band is empty, returns `Int[]`. If every `fz` in the band is already a block factor, returns
+`Int[]` (same “dense ladder” idea as horizontal extras).
+"""
+function hybrid_sliding_extra_vertical_default(
+    nz::Int,
+    dz_ref::T,
+    max_dz::T,
+    block_fzs::AbstractSet{Int};
+    budget::Int = 5,
+)::Vector{Int} where {T <: Real}
+    budget >= 1 || throw(ArgumentError("budget must be >= 1"))
+    fz_max = effective_fz_max(nz, dz_ref, max_dz)
+    fz_max < 1 && return Int[]
+    lo = fld(fz_max, 2) + 1
+    hi = fz_max
+    lo > hi && return Int[]
+    cand = subsample_closed_range(lo, hi, budget)
+    extra = filter(w -> !(w in block_fzs), cand)
+    if !isempty(extra)
+        return extra
+    end
+    if all(z -> z in block_fzs, lo:hi)
+        return Int[]
+    end
+    return filter(w -> !(w in block_fzs), cand)
 end
 
 """

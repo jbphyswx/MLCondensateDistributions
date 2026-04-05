@@ -123,7 +123,7 @@ Base.@kwdef struct TabularBuildOptions
     sliding_outputs_h::Int = 2
     sliding_outputs_v::Int = 2
     sliding_outputs_z::Int = 2
-    """Subsampled horizontal window count for `:sliding` and hybrid sliding extras."""
+    """Subsampled horizontal scales: block `nh` count, `:sliding` window sizes, and hybrid extra-window candidate pool (see `ReductionSpecs.subsample_closed_range`). Use a value ≥ `nh_max - nh_min + 1` for a full integer ladder."""
     sliding_window_budget_h::Int = 5
 end
 
@@ -207,7 +207,7 @@ corresponding env-derived fields in a **single** construction (no extra copy).
 | `sliding_outputs_h` | `MLCD_SLIDING_OUTPUTS_H` |
 | `sliding_outputs_v` | `MLCD_SLIDING_OUTPUTS_V` |
 | `sliding_outputs_z` | `MLCD_SLIDING_OUTPUTS_Z` |
-| `sliding_window_budget_h` | `MLCD_SLIDING_WINDOW_BUDGET_H` |
+| `sliding_window_budget_h` | `MLCD_SLIDING_WINDOW_BUDGET_H` (block `nh` subsample + sliding/hybrid window budgets; set very large for full `nh_min:nh_max` blocks) |
 """
 function tabular_build_options_from_env(; kw...)::TabularBuildOptions
     coarsening_raw = lowercase(strip(get(ENV, "MLCD_COARSENING_MODE", "hybrid")))

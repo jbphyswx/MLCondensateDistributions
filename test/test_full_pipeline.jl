@@ -38,9 +38,10 @@ Test.@testset "End-to-End GCP Orchestrator Integration Pipeline" begin
     @info "Here is exactly how the extracted Tabular Physics array manifests inside the integration payload:"
     display(DataFrames.first(df_reinstated, 15))
 
-    # Validate structure: column order and names must match the builder schema exactly.
-    expected_schema = string.(collect(MLCD.DatasetBuilder.SCHEMA_SYMBOL_ORDER))
+    # Validate structure: must match `dataset_spec.md` via package canonical names.
+    expected_schema = collect(MLCD.DatasetBuilder.DATASET_SPEC_CODE_NAMES)
     Test.@test names(df_reinstated) == expected_schema
+    Test.@test names(df_reinstated) == string.(collect(MLCD.DatasetBuilder.SCHEMA_SYMBOL_ORDER))
 
     # Row count can be 0 on a sparse cloud mask for some chunks; here we still assert schema parity above.
     @info "Integration validated identically against schema. Sliced $(DataFrames.nrow(df_reinstated)) valid cloudy blocks out of the raw sub-grid!"

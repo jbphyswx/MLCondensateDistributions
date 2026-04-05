@@ -81,9 +81,9 @@ Tabular rows are built via `DatasetBuilderImpl.process_abstract_chunk`, driven b
 
 | Mode | Meaning |
 |------|--------|
-| `hybrid` | Default: block ladder where appropriate + sliding valid-box samples for gap scales. |
-| `block` | Truncated non-overlapping 3D blocks; optional explicit factor list via `spatial_info.block_triples` in library callers. |
-| `sliding` | Sliding valid-box reductions only (see `sliding_outputs_*` / optional `sliding_stride_*` in `spatial_info`). |
+| `hybrid` | Default: **subsampled** block `nh` (`sliding_window_budget_h`, default 5) + sliding valid-box passes only for window sizes **not** already in that block set (often none). |
+| `block` | Truncated non-overlapping 3D blocks; default `nh` subsample as above; optional explicit factor list via `spatial_info.block_triples`. |
+| `sliding` | Sliding valid-box reductions only; window sizes subsampled with the same budget knob (`sliding_window_budget_h`). |
 
 Shell / batch scripts: set `MLCD_COARSENING_MODE` to `hybrid`, `block`, or `sliding`. Older env values such as `convolutional` or `binary` still parse but log a deprecation warning and behave as `hybrid`.
 

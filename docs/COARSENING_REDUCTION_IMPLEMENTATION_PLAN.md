@@ -16,7 +16,7 @@ Cross-reference: `VERTICAL_COARSENING_PLAN.md` (vertical ladder & z-dropping rul
 |------|--------|----------------|
 | **User-facing `coarsening_mode`** | **Done** | `:hybrid` (default), `:block`, `:sliding` only. `:binary`, `:convolutional`, legacy aliases → **`ArgumentError`** in `process_abstract_chunk_impl`, or **`MLCD_COARSENING_MODE`** legacy strings → **warn once + `:hybrid`** in `tabular_build_options_from_env`. |
 | **Explicit block factors** | **Done** | `spatial_info.block_triples` (optional); legacy key `convolutional_square_horizontal` → prefer **`block_square_horizontal`**. |
-| **Horizontal block schedule** | **Done** | `truncated_horizontal_sizes`: BFS from `nh_min = ceil(min_h/dx)` with multipliers **2, 3, 5**, cap at `min(nx,ny)`, always include **`nh_max`** if missing. **Removed** the old **`nh_min+1`** extra rung. |
+| **Horizontal block schedule** | **Done** | Default: **`subsample_closed_range(nh_min, nh_max, sliding_window_budget_h)`** (same budget knob as sliding/hybrid; default **5**). Opt-in full band: `horizontal_budget = nothing` in `ReductionSpecs` or set budget **≥** `nh_max - nh_min + 1`. **Tower:** `_block_truncated_horizontal_cache!` chains largest cached `s | nh`. |
 | **Horizontal tower + cache (block path)** | **Done** | `_block_truncated_horizontal_cache!` in `dataset_builder_impl.jl`: per-`nh` means/products from native or **largest divisor** in cache; products chain with **`coarsen_fields_at_level`** on `<xy>` caches (not `coarsen_products_at_level`). Then vertical **`fz`** per triple. Non-square explicit triples still use one-shot `coarsen_fields_3d_block`. |
 | **Vertical `fz` in block triples** | **Done** | All **`fz \| nz`** with `fz * dz_ref ≤ max_dz` (not binary-only). |
 | **Sliding** | **Done (sparse default)** | Valid-box means/products; **`valid_box_anchor_starts`** when strides not explicit (corner-preserving `K` samples; **`K` capped** to number of valid placements). **`uniform_stride_for_valid_box`** when **`sliding_stride_*`** set. |
@@ -38,7 +38,7 @@ Cross-reference: `VERTICAL_COARSENING_PLAN.md` (vertical ladder & z-dropping rul
 - [x] **Block reductions**: Non-overlapping blocks; **truncated domain** — `⌊nx / nh⌋ × nh` per axis, remainder discarded (see `truncated_block_extent`, block path in `dataset_builder_impl.jl`).
 - [x] **Sliding convolution**: Valid-box local means/products implemented (`conv3d_valid_box_*`, `*_at_starts`); **does not** reuse block cache DAG (by design). Further perf (threading, etc.) still open.
 - [x] **Hybrid (default)**: Block tower + sliding gap passes; default **`TabularBuildOptions.coarsening_mode = :hybrid`** and env default **`hybrid`**.
-- [x] **Deprecate `binary` / `convolutional` as user modes**: **Removed** from API (errors + env remap); horizontal schedule uses **{2,3,5} monoid**, not “binary-only ladder.”
+- [x] **Deprecate `binary` / `convolutional` as user modes**: **Removed** from API (errors + env remap); default horizontal block `nh` is **subsampled** in **`[nh_min,nh_max]`**, not divisor-of-native enumeration.
 - [~] **Tests & perf**: Many unit/integration tests; **large-N perf regression** vs stride-1 baseline (§9 Phase 5b) still open.
 - [x] **Terabyte-scale defaults**: Sparse sliding outputs (`sliding_outputs_*` default 2), window budget (`sliding_window_budget_h`), subsampled sliding triples — see Phase 5b.
 
@@ -81,7 +81,7 @@ Checklist:
 
 ### 4.1 Horizontal example (truncation geometry — illustrative)
 
-Domain **124×124** native, `dx = 50 m`, target **≥ 1 km** ⇒ **`nh_min = 20`**. The **schedule** may also include **`nh = 124`** (domain scale) and other values from the **{2,3,5}** tower (e.g. 20, 40, 60, …). The example **`nh = 21`** below is **only** a worked truncation illustration (how many cells are used/discarded for a **chosen** block width), **not** a guarantee that **21** appears in the default schedule.
+Domain **124×124** native, `dx = 50 m`, target **≥ 1 km** ⇒ **`nh_min = 20`**, **`nh_max = 124`**. **Default** block `nh` list is **five** evenly spaced integers in `[20,124]` (e.g. **20, 46, 72, 98, 124** with default budget **5**). **Full** ladder `20:124` requires a larger `sliding_window_budget_h` (≥ 105) or `horizontal_budget = nothing` from Julia. The **`nh = 21`** subsection below illustrates **truncation geometry** for that width (not default schedule).
 
 For **`nh = 21`**:
 
@@ -93,7 +93,7 @@ For **`nh = 21`**:
 - [x] **Origin**: Fixed low-index corner **`(1,1,1)`** (truncated block / valid-box conventions in `dataset_builder_impl` / `array_utils`).
 - [x] **Remainder**: Dropped; **no** renormalization of global means by “fraction of domain.”
 - [x] **Vertical**: `⌊nz / fz⌋` full layers from bottom; remainder dropped (consistent with `conv3d_block_mean` / vertical coarsen).
-- [x] **Schedule**: Horizontal **`nh`** from **`min_h` + {2,3,5} tower + `nh_max`**; vertical **`fz`** from **divisors of `nz`** with **`fz * dz_ref ≤ max_dz`** — **not** “all divisors of `nx`” for horizontal.
+- [x] **Schedule**: Horizontal **`nh`** default = **subsampled** (`sliding_window_budget_h` points) in **`[ceil(min_h/dx), min(nx,ny)]`**; optional **full** integer band via large budget or `horizontal_budget = nothing`. Vertical **`fz`**: **divisors of `nz`** with **`fz * dz_ref ≤ max_dz`**.
 - [x] **Chaining / cache** (horizontal block path): `_process_abstract_chunk_block_truncated` builds per-`nh` means/products from native or from the largest cached divisor `s | nh` (pool by `nh÷s`); products chain with `coarsen_fields_at_level` on cached `<xy>` fields (not `coarsen_products_at_level`, which expects native field keys). Vertical `fz` is applied per triple after horizontal cache lookup.
 
 ### 4.3 “Largest block nh ≤ N/2” and the hybrid gap
@@ -102,7 +102,7 @@ Non-overlapping blocks of size `nh` can only tile at most **`⌊N/nh⌋`** windo
 
 Hybrid default (conceptual):
 
-- [x] **Phase A — blocks (schedule)**: `truncated_horizontal_sizes` closes `nh_min = ceil(min_h/dx)` under multiply-by-{2,3,5} up to `min(nx,ny)`, then adds `nh_max` if missing (domain scale). No extra `nh_min+1` rung.
+- [x] **Phase A — blocks (schedule)**: `truncated_horizontal_sizes` default subsamples **`nh_min:nh_max`** to **`sliding_window_budget_h`** points. Hybrid sliding extras skip sizes already in the block set; filtered **`default_hybrid_sliding_windows`** avoids duplicating a block `nh`.
 - [x] **Phase B — sliding (operational)**: Hybrid runs **`hybrid_sliding_extra_sizes_default`** (subsampled window sizes **not** already in the block `nh` set, budget **`sliding_window_budget_h`**) × same **`z_factors`** as block schedule; **always from native** fine fields for sliding passes (no block-cache reuse). **Not yet**: explicit “Δh tolerance” planner (e.g. 5%) — current policy is **subsampled extras**, not meter-gap optimization.
 
 Document **tolerance** (e.g. 5% on Δh) in config — **future**.
@@ -273,7 +273,7 @@ Checklist:
 
 - **Block-first** hybrid; **sparse sliding** for extra window sizes; default **`K = 2`** per axis via **`sliding_outputs_*`** when strides not explicit.
 - **Anchor path**: corner-preserving **`valid_box_anchor_starts`**; **`uniform_stride_for_valid_box`** when **`sliding_stride_*`** set (different edge semantics — see §5.5).
-- **Window sizes:** budgeted **`sliding_window_budget_h`**; horizontal block scales from **{2,3,5}** tower + **`nh_max`**.
+- **Window sizes:** **`sliding_window_budget_h`** subsamples block `nh`, sliding windows, and hybrid-extra candidates within **`[nh_min,nh_max]`** (full band if budget ≥ span length).
 
 ---
 
@@ -288,4 +288,4 @@ Checklist:
 
 ---
 
-*Last updated: 2026-04 — §0 progress snapshot; goals/phases/migration aligned with shipped `DatasetBuilderImpl`, `reduction_specs`, `array_utils`; clarified §4.1 example vs schedule; block horizontal cache + {2,3,5} tower; legacy mode removal + env behavior; checkbox pass throughout.*
+*Last updated: 2026-04 — default horizontal block `nh` subsampled (`sliding_window_budget_h`); optional full `nh_min:nh_max`; divisor-chain block cache; hybrid sliding extras dedupe; legacy mode removal + env behavior.*

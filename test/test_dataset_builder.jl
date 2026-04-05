@@ -8,6 +8,13 @@ include("../utils/dataset_builder.jl")
 
 using .DatasetBuilder: DatasetBuilder
 
+Test.@testset "Arrow schema matches dataset_spec.md (36 columns)" begin
+    Test.@test length(DatasetBuilder.SCHEMA_SYMBOL_ORDER) == 36
+    Test.@test length(DatasetBuilder.DATASET_SPEC_CODE_NAMES) == 36
+    Test.@test string.(collect(DatasetBuilder.SCHEMA_SYMBOL_ORDER)) ==
+        collect(DatasetBuilder.DATASET_SPEC_CODE_NAMES)
+end
+
 Test.@testset "Dataset Builder Orchestration Unit Test" begin
     @info "Synthesizing a dummy 16x16x16 chunk of fine-scale LES fields..."
     

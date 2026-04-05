@@ -808,13 +808,14 @@ end
     coarsen_dz_profile_factor(dz_profile, fz)
 
 Coarsen a per-level thickness profile by summing each contiguous group of `fz` native layers.
-Output length is `length(dz_profile) ÷ fz`.
+Uses only the low-index truncated extent `⌊length(dz_profile)/fz⌋·fz` (same as vertical block means);
+output length is `⌊length(dz_profile)/fz⌋`.
 """
 function coarsen_dz_profile_factor(dz_profile::AbstractVector{<:Real}, fz::Int)
     fz >= 1 || throw(ArgumentError("fz must be >= 1"))
     nz = length(dz_profile)
-    rem(nz, fz) != 0 && throw(DimensionMismatch("dz_profile length $nz must be divisible by fz=$fz"))
     nzo = div(nz, fz)
+    nzo < 1 && return Float32[]
     out = Vector{Float32}(undef, nzo)
     @inbounds for k in 1:nzo
         base = (k - 1) * fz + 1

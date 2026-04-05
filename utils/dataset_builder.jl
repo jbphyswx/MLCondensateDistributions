@@ -7,25 +7,62 @@ using ..Dynamics: Dynamics
 include("reduction_specs.jl")
 using .ReductionSpecs
 
-export process_abstract_chunk, SCHEMA_SYMBOL_ORDER, ReductionSpecs, DatasetBuilderImpl
+export process_abstract_chunk, SCHEMA_SYMBOL_ORDER, DATASET_SPEC_CODE_NAMES, ReductionSpecs, DatasetBuilderImpl
 
 const CLOUD_PRESENCE_THRESHOLD = 1f-10
 
 """
+    DATASET_SPEC_CODE_NAMES
+
+String column names in **strict order** — must match `dataset_spec.md` (36 rows). Arrow / DataFrame
+writers derive [`SCHEMA_SYMBOL_ORDER`](@ref) from this tuple so the schema cannot drift silently.
+"""
+const DATASET_SPEC_CODE_NAMES = (
+    "qt",
+    "theta_li",
+    "ta",
+    "p",
+    "rho",
+    "w",
+    "q_liq",
+    "q_ice",
+    "q_con",
+    "liq_fraction",
+    "ice_fraction",
+    "cloud_fraction",
+    "tke",
+    "var_qt",
+    "var_ql",
+    "var_qi",
+    "var_w",
+    "var_h",
+    "cov_qt_ql",
+    "cov_qt_qi",
+    "cov_qt_w",
+    "cov_qt_h",
+    "cov_ql_qi",
+    "cov_ql_w",
+    "cov_ql_h",
+    "cov_qi_w",
+    "cov_qi_h",
+    "cov_w_h",
+    "resolution_h",
+    "domain_h",
+    "resolution_z",
+    "data_source",
+    "month",
+    "cfSite_number",
+    "forcing_model",
+    "experiment",
+)
+
+"""
     SCHEMA_SYMBOL_ORDER
 
-The strictly enforced canonical column sequence for the ML training dataset (includes reduction metadata columns).
+Symbol form of [`DATASET_SPEC_CODE_NAMES`](@ref). Coarsening provenance (`reduction_*`, `truncation_*`)
+is **not** part of the training schema; use `(resolution_h, resolution_z)` to distinguish scales.
 """
-const SCHEMA_SYMBOL_ORDER = (
-    :qt, :theta_li, :ta, :p, :rho, :w, :q_liq, :q_ice, :q_con,
-    :liq_fraction, :ice_fraction, :cloud_fraction,
-    :tke,
-    :var_qt, :var_ql, :var_qi, :var_w, :var_h,
-    :cov_qt_ql, :cov_qt_qi, :cov_qt_w, :cov_qt_h,
-    :cov_ql_qi, :cov_ql_w, :cov_ql_h, :cov_qi_w, :cov_qi_h, :cov_w_h,
-    :resolution_h, :domain_h, :resolution_z, :data_source, :month, :cfSite_number, :forcing_model, :experiment,
-    :reduction_kind, :reduction_nh, :reduction_fz, :truncation_x, :truncation_y, :truncation_z,
-)
+const SCHEMA_SYMBOL_ORDER = ntuple(i -> Symbol(DATASET_SPEC_CODE_NAMES[i]), length(DATASET_SPEC_CODE_NAMES))
 
 @inline function _indicator_01(x::Real, threshold::Float32)
     return x > threshold ? 1f0 : 0f0
@@ -71,13 +108,7 @@ function flatten_and_filter!(
     dz_profile::AbstractVector{FT},
     resolution_h::FT,
     domain_h::FT,
-    metadata;
-    reduction_kind::AbstractString = "hybrid",
-    reduction_nh::Int = -1,
-    reduction_fz::Int = -1,
-    truncation_x::Int = -1,
-    truncation_y::Int = -1,
-    truncation_z::Int = -1,
+    metadata,
 ) where {FT <: Real}
 
     nx, ny, nz = size(mask)
@@ -200,12 +231,6 @@ function flatten_and_filter!(
     df[!, :cfSite_number] = fill(meta_cf, n_valid)
     df[!, :forcing_model] = fill(meta_fm, n_valid)
     df[!, :experiment] = fill(meta_ex, n_valid)
-    df[!, :reduction_kind] = fill(reduction_kind, n_valid)
-    df[!, :reduction_nh] = fill(reduction_nh, n_valid)
-    df[!, :reduction_fz] = fill(reduction_fz, n_valid)
-    df[!, :truncation_x] = fill(truncation_x, n_valid)
-    df[!, :truncation_y] = fill(truncation_y, n_valid)
-    df[!, :truncation_z] = fill(truncation_z, n_valid)
     return nothing
 end
 

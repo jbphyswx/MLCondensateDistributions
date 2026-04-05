@@ -368,8 +368,10 @@ end
 
 """
 Build horizontally coarsened means/products for every `nh` appearing in `triples`, reusing the
-largest cached divisor `s | nh` and pooling by `nh÷s` (same idea as `build_horizontal_multilevel_views`).
-Vertical `fz` is applied later per triple via `coarsen_*_vertical_at_level`.
+largest cached divisor `s | nh` among **already-built** scales and pooling by `nh÷s` (tower /
+composition: e.g. 60 from 20×3 when `means_h[20]` exists). `triples` should be processed with
+`nhs` sorted ascending (as here). Vertical `fz` is applied later per triple via
+`coarsen_*_vertical_at_level`.
 """
 function _block_truncated_horizontal_cache!(
     means_h::Dict{Int, NamedTuple},
@@ -427,6 +429,7 @@ function _process_abstract_chunk_block_truncated(
     square_h || throw(ArgumentError("block_truncated coarsening currently requires block_square_horizontal=true (legacy key convolutional_square_horizontal is still accepted)"))
     dz_ref = FT(sum(dz_native) / length(dz_native))
     explicit_block = _spatial_lookup(spatial_info, :block_triples, nothing)
+    h_budget = Int(_spatial_lookup(spatial_info, :sliding_window_budget_h, 5))
     triples = if explicit_block === nothing
         block_reduction_triples(
             nx,
@@ -437,6 +440,7 @@ function _process_abstract_chunk_block_truncated(
             dz_ref,
             FT(max_dz);
             square_horizontal = true,
+            horizontal_budget = h_budget,
         )
     else
         Vector{NTuple{3,Int}}(collect(explicit_block))
@@ -629,9 +633,6 @@ function _process_abstract_chunk_block_truncated(
                 end
             end
         end
-        _, disc_x = truncated_block_extent(nx, fx)
-        _, disc_y = truncated_block_extent(ny, fy)
-        _, disc_z = truncated_block_extent(nz, fz)
         df_level = DataFrames.DataFrame()
         DatasetBuilder.flatten_and_filter!(
             df_level,
@@ -666,13 +667,7 @@ function _process_abstract_chunk_block_truncated(
             v_dz_profile,
             Float32(current_resolution_h),
             domain_h,
-            metadata;
-            reduction_kind = "block_truncated",
-            reduction_nh = fx,
-            reduction_fz = fz,
-            truncation_x = disc_x,
-            truncation_y = disc_y,
-            truncation_z = disc_z,
+            metadata,
         )
         if DataFrames.nrow(df_level) > 0
             if isnothing(out_acc)
@@ -721,7 +716,7 @@ function _process_abstract_chunk_sliding(
     future_z_empty = Int[]
     out_acc = nothing
     for (wh, _wh, wz) in triples
-        means, prods, trunc_x, trunc_y, trunc_z = _coarsen_sliding_valid_box(
+        means, prods, _, _, _ = _coarsen_sliding_valid_box(
             fields,
             product_pairs,
             spatial_info,
@@ -936,13 +931,7 @@ function _process_abstract_chunk_sliding(
             v_dz_profile,
             Float32(current_resolution_h),
             domain_h,
-            metadata;
-            reduction_kind = "sliding_valid",
-            reduction_nh = wh,
-            reduction_fz = wz,
-            truncation_x = max(0, trunc_x),
-            truncation_y = max(0, trunc_y),
-            truncation_z = max(0, trunc_z),
+            metadata,
         )
         if DataFrames.nrow(df_level) > 0
             if isnothing(out_acc)
@@ -1001,6 +990,7 @@ function _process_abstract_chunk_hybrid(
         dz_ref,
         FT(max_dz);
         square_horizontal = true,
+        horizontal_budget = win_budget,
     )
     block_nhs = Set{Int}(t[1] for t in triples_block)
     win_extra = if extra === nothing
@@ -1016,17 +1006,26 @@ function _process_abstract_chunk_hybrid(
         Vector{Int}(collect(extra))
     end
     isempty(win_extra) && return df_b
-    z_factors = Int[]
-    for fz in 1:nz
-        mod(nz, fz) != 0 && continue
-        fz * dz_ref > max_dz && continue
-        push!(z_factors, fz)
+    block_fzs = Set{Int}(t[3] for t in triples_block)
+    win_extra_z = hybrid_sliding_extra_vertical_default(
+        nz,
+        dz_ref,
+        FT(max_dz),
+        block_fzs;
+        budget = win_budget,
+    )
+    if isempty(win_extra_z)
+        fz_top = effective_fz_max(nz, dz_ref, FT(max_dz))
+        if fz_top >= 1
+            win_extra_z = filter(w -> !(w in block_fzs), subsample_closed_range(1, fz_top, win_budget))
+        end
     end
+    isempty(win_extra_z) && return df_b
     future_z_empty = Int[]
     out_acc = DataFrames.nrow(df_b) > 0 ? df_b : nothing
     for wh in win_extra
-        for wz in z_factors
-            means, prods, trunc_x, trunc_y, trunc_z = _coarsen_sliding_valid_box(
+        for wz in win_extra_z
+            means, prods, _, _, _ = _coarsen_sliding_valid_box(
                 fields,
                 product_pairs,
                 spatial_info,
@@ -1241,13 +1240,7 @@ function _process_abstract_chunk_hybrid(
                 v_dz_profile,
                 Float32(current_resolution_h),
                 domain_h,
-                metadata;
-                reduction_kind = "hybrid_sliding",
-                reduction_nh = wh,
-                reduction_fz = wz,
-                truncation_x = max(0, trunc_x),
-                truncation_y = max(0, trunc_y),
-                truncation_z = max(0, trunc_z),
+                metadata,
             )
             if DataFrames.nrow(df_level) > 0
                 if isnothing(out_acc)

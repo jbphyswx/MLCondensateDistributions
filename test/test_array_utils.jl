@@ -88,6 +88,8 @@ Test.@testset "ArrayUtils coarsen_dz_profile_factor" begin
     Test.@test coarsen_dz_profile_2x(dz) == coarsen_dz_profile_factor(dz, 2)
     dz_odd = Float32[1, 1, 1]
     Test.@test coarsen_dz_profile_2x(dz_odd) ≈ Float32[2]
+    dz_trunc = Float32[1, 2, 3, 4, 5, 6, 99]  # top level dropped for fz=3
+    Test.@test coarsen_dz_profile_factor(dz_trunc, 3) ≈ Float32[6, 15]
 end
 
 Test.@testset "ArrayUtils conv3d_block_mean vs horizontal+vertical" begin
