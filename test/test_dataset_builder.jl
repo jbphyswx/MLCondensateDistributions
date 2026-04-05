@@ -4,9 +4,10 @@ using DataFrames: DataFrames
 using Random: Random
 using Statistics: Statistics
 
-include("../utils/coarse_graining.jl")
-include("../utils/dynamics.jl")
-include("../utils/dataset_builder.jl")
+include(joinpath(@__DIR__, "..", "utils", "coarse_graining.jl"))
+include(joinpath(@__DIR__, "..", "utils", "dynamics.jl"))
+include(joinpath(@__DIR__, "..", "utils", "statistical_methods", "StatisticalMethods.jl"))
+include(joinpath(@__DIR__, "..", "utils", "dataset_builder.jl"))
 
 using .DatasetBuilder: DatasetBuilder
 
@@ -152,12 +153,9 @@ Test.@testset "GoogleLES metadata schema regression" begin
     Test.@test length(z_levels) >= 3
 end
 
-"""
-Naive per-voxel variance as `⟨x²⟩ − ⟨x⟩²` in Float32 can go **negative** from cancellation when the mean is
-large and fluctuations are tiny (see `scripts/welford_test.jl`). The dataset builder uses Chan/M2 merge and
-consistent `invn` scaling so emitted **`var_*` and `tke`** stay physically sensible. This test exercises that
-with a cancellation-prone mean level and checks an Arrow round-trip.
-"""
+# Naive Float32 variance as ⟨x²⟩−⟨x⟩² can go negative under large means and tiny fluctuations
+# (see scripts/welford_test.jl). Builder uses Chan/M2 merge + invn scaling; we stress that here and
+# round-trip through Arrow.
 Test.@testset "Emitted var_* / tke nonnegative (stress) + Arrow round-trip" begin
     dims = (32, 32, 16)
     rng = Random.MersenneTwister(2026)

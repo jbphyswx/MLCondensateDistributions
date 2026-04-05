@@ -3,6 +3,7 @@ using Random: Random
 
 include("../utils/coarse_graining.jl")
 include("../utils/dynamics.jl")
+include(joinpath(@__DIR__, "..", "utils", "statistical_methods", "StatisticalMethods.jl"))
 include("../utils/dataset_builder.jl")
 using .DatasetBuilder: DatasetBuilder, DatasetBuilderImpl
 
