@@ -3,10 +3,34 @@ module CairoMakieExt
 using CairoMakie: CairoMakie as CM
 using Dates: Dates
 using DataFrames: DataFrames
+using Printf: Printf
 using Random: Random
 using Statistics: Statistics
 
 using MLCondensateDistributions: MLCondensateDistributions as MLCD
+
+"""Short string for resolution tick labels (avoids 10+ significant figures)."""
+function _resolution_tick_string(x::Float64)
+    !isfinite(x) && return "NaN"
+    ax = abs(x)
+    (ax >= 10_000 || (ax > 0 && ax < 0.01)) && return Printf.@sprintf("%.4g", x)
+    return string(round(x; sigdigits=5))
+end
+
+"""
+At most `max_ticks` positions from sorted unique values, for readable axes when there are
+hundreds of distinct resolutions (e.g. `resolution_z`).
+"""
+function _compact_resolution_ticks(vals::AbstractVector{<:Real}; max_ticks::Int=12)
+    v = sort(unique(Float64.(vals)))
+    n = length(v)
+    n == 0 && return Float64[], String[]
+    if n <= max_ticks
+        return v, [_resolution_tick_string(x) for x in v]
+    end
+    idx = unique(round.(Int, range(1, n; length=max_ticks)))
+    return v[idx], [_resolution_tick_string(x) for x in v[idx]]
+end
 
 """
 Group target columns into the `q_`, `var_`, and `cov_` subsets used by the diagnostics plots.
@@ -248,7 +272,8 @@ function MLCD.Viz.plot_targets_vs_resolution(df::DataFrames.DataFrame, targets::
         density = log10.(counts .+ 1)
         hm = CM.heatmap!(ax, xedges, yedges, permutedims(density); colormap=:viridis, interpolate=false)
         CM.Colorbar(fig[r, cb_col], hm)
-        ax.xticks = (xvals, string.(round.(xvals; digits=1)))
+        tx, tl = _compact_resolution_ticks(xvals; max_ticks=14)
+        ax.xticks = (tx, tl)
 
         g = MLCD.Analysis.group_reduce(df, [res_col], target; reducer=Statistics.median, output_col=:median)
         x = Float64.(g[!, res_col])
@@ -305,23 +330,79 @@ function MLCD.Viz.plot_targets_heatmaps(df::DataFrames.DataFrame, targets::Vecto
             hs, zs, mat = MLCD.Analysis.build_heatmap_matrix(df, :resolution_h, :resolution_z, target; reducer=Statistics.median)
             xedges = MLCD.Common.centers_to_edges(hs)
             yedges = MLCD.Common.centers_to_edges(zs)
+            # `mat` is [resolution_z, resolution_h] (rows = z, cols = h). Makie heatmap!(xedges, yedges, M) expects
+            # size(M,1) == length(xedges)-1 and size(M,2) == length(yedges)-1, so M must be [h, z].
+            mat_xy = permutedims(mat)
 
             if startswith(String(target), "cov_")
                 finite_vals = [x for x in vec(mat) if isfinite(x)]
                 maxabs = isempty(finite_vals) ? 1f0 : Statistics.maximum(abs, finite_vals)
                 cr = isfinite(maxabs) && maxabs > 0 ? (-maxabs, maxabs) : (-1f0, 1f0)
-                hm = CM.heatmap!(ax, xedges, yedges, mat; colormap=:balance, colorrange=cr)
+                hm = CM.heatmap!(
+                    ax,
+                    xedges,
+                    yedges,
+                    mat_xy;
+                    colormap=:balance,
+                    colorrange=cr,
+                    interpolate=false,
+                    nan_color=:lightgray,
+                )
                 CM.Colorbar(fig[r, cb_col], hm)
             else
-                hm = CM.heatmap!(ax, xedges, yedges, mat; colormap=:viridis)
+                hm = CM.heatmap!(
+                    ax,
+                    xedges,
+                    yedges,
+                    mat_xy;
+                    colormap=:viridis,
+                    interpolate=false,
+                    nan_color=:lightgray,
+                )
                 CM.Colorbar(fig[r, cb_col], hm)
             end
 
-            ax.xticks = (hs, string.(hs))
-            ax.yticks = (zs, string.(zs))
+            hx, hl = _compact_resolution_ticks(hs; max_ticks=12)
+            zx, zl = _compact_resolution_ticks(zs; max_ticks=12)
+            ax.xticks = (hx, hl)
+            ax.yticks = (zx, zl)
         end
     end
 
+    mkpath(dirname(out_path))
+    CM.save(out_path, fig)
+    return out_path
+end
+
+"""
+Plot binned median of each `target` column versus continuous `x_col` and save a multi-panel figure.
+"""
+function MLCD.Viz.plot_targets_binned_vs_x(
+    df::DataFrames.DataFrame,
+    targets::Vector{Symbol},
+    x_col::Symbol,
+    out_path::String;
+    nbins::Int = 40,
+    title_suffix::String = "",
+)
+    isempty(targets) && error("plot_targets_binned_vs_x: targets is empty")
+    n = length(targets)
+    ncol = min(4, max(1, n))
+    nrow = cld(n, ncol)
+    fig = CM.Figure(size=(560 * ncol, 320 * nrow))
+    xlab = String(x_col)
+    for (i, target) in enumerate(targets)
+        r = cld(i, ncol)
+        c = ((i - 1) % ncol) + 1
+        ttl = String(target) * title_suffix
+        ax = CM.Axis(fig[r, c]; title=ttl, xlabel=xlab, ylabel=String(target))
+        xv = Float64.(df[!, x_col])
+        yv = Float64.(df[!, target])
+        xc, ym = MLCD.Common.binned_median(xv, yv; nbins=nbins)
+        if !isempty(xc)
+            CM.lines!(ax, xc, ym; linewidth=2, color=:steelblue)
+        end
+    end
     mkpath(dirname(out_path))
     CM.save(out_path, fig)
     return out_path

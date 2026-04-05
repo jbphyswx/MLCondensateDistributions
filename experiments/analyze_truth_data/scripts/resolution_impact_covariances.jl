@@ -1,8 +1,15 @@
 #=
 
-    Here, we explore how vertical and horizontal GCM resolution (so domain size from LES averaging) impact our calculated covariances
+    Here, we explore how vertical and horizontal GCM resolution (so domain size from LES averaging) impact our calculated covariances.
 
-    Figures are saved to: MLCondensateDistributions/experiments/analyze_truth_data/figures
+    Run from repo root (or this directory with adjusted paths):
+
+        julia --project=experiments/analyze_truth_data experiments/analyze_truth_data/scripts/resolution_impact_covariances.jl
+
+    Input: `Paths.processed_data_root()` → `<package>/data/processed/*.arrow`.
+    Smoke test: `run_resolution_impact_covariances!(; max_files=3)`.
+
+    Figures: experiments/analyze_truth_data/figures/resolution_impact_covariances/
 
 =#
 
@@ -14,7 +21,7 @@ const FIG_DIR = joinpath(@__DIR__, "..", "figures", "resolution_impact_covarianc
 
 function run_resolution_impact_covariances!(; data_dir::String = MLCD.Paths.processed_data_root(), max_files::Int = 0)
     @info "Loading processed Arrow data for resolution-impact analysis" data_dir
-    df, targets = MLCD.DataHandling.load_resolution_moments_df(data_dir; max_files=max_files)
+    df, targets = MLCD.DataHandling.load_moments_dataframe(data_dir; max_files=max_files)
     @info "Loaded rows for analysis" rows=DataFrames.nrow(df) n_targets=length(targets)
 
     mkpath(FIG_DIR)

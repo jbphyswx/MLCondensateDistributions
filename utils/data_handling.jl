@@ -7,7 +7,7 @@ using Arrow: Arrow
 using DataFrames: DataFrames
 
 export list_arrow_files, select_columns, load_arrow_dataframe, validate_required_columns
-export collect_arrow_files, select_columns_by_prefix, load_resolution_moments_df
+export collect_arrow_files, select_columns_by_prefix, load_resolution_moments_df, load_moments_dataframe
 
 """Return sorted Arrow files from `data_dir` (optionally limited by `max_files`)."""
 function list_arrow_files(data_dir::String; max_files::Int = 0)
@@ -95,6 +95,30 @@ function select_columns_by_prefix(colnames::Vector{Symbol}, prefixes::Vector{Str
 end
 
 """
+    load_moments_dataframe(data_dir; max_files=0, target_prefixes=[...], extra_columns=Symbol[])
+
+Load processed Arrow files with horizontal/vertical resolution, all moment columns matching
+`target_prefixes`, and any `extra_columns` (e.g. `:tke`, `:liq_fraction`).
+
+Returns `(df, target_cols)` where `target_cols` are only the moment columns (not `extra_columns`).
+"""
+function load_moments_dataframe(
+    data_dir::String;
+    max_files::Int = 0,
+    target_prefixes::Vector{String} = ["cov_", "var_"],
+    extra_columns::Vector{Symbol} = Symbol[],
+)
+    probe_files = list_arrow_files(data_dir; max_files=1)
+    schema_df = DataFrames.DataFrame(Arrow.Table(first(probe_files)))
+    colnames = Symbol.(names(schema_df))
+    target_cols = select_columns(colnames; prefixes=target_prefixes)
+
+    required_cols = unique!(vcat([:resolution_h, :resolution_z], extra_columns, target_cols))
+    df = load_arrow_dataframe(data_dir; columns=required_cols, max_files=max_files, drop_empty=true)
+    return df, target_cols
+end
+
+"""
 Load processed Arrow files and return a DataFrame with resolution + moment columns.
 
 Returns `(df, target_cols)` where `target_cols` are all columns matching
@@ -105,16 +129,8 @@ function load_resolution_moments_df(
     max_files::Int = 0,
     target_prefixes::Vector{String} = ["cov_", "var_"],
 )
-    Base.depwarn("load_resolution_moments_df is transitional; prefer load_arrow_dataframe + select_columns", :load_resolution_moments_df)
-
-    files = list_arrow_files(data_dir; max_files=max_files)
-    first_df = DataFrames.DataFrame(Arrow.Table(first(files)))
-    cols = Symbol.(names(first_df))
-    target_cols = select_columns(cols; prefixes=target_prefixes)
-
-    required_cols = vcat([:resolution_h, :resolution_z], target_cols)
-    df = load_arrow_dataframe(data_dir; columns=required_cols, max_files=max_files, drop_empty=true)
-    return df, target_cols
+    Base.depwarn("load_resolution_moments_df is transitional; prefer load_moments_dataframe", :load_resolution_moments_df)
+    return load_moments_dataframe(data_dir; max_files=max_files, target_prefixes=target_prefixes)
 end
 
 end # module

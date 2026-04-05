@@ -2,6 +2,13 @@
 
     We create tons of .arrow files and save them in MLCondensateDistributions/data/processed
 
+    Running analyses (activate the experiment project so CairoMakie loads the plotting extension):
+
+        julia --project=experiments/analyze_truth_data experiments/analyze_truth_data/run_all.jl
+
+    Or run individual scripts under experiments/analyze_truth_data/scripts/ (same --project=...).
+    Use keyword `max_files` in each `run_*!` function for quick smoke tests on a subset of Arrow files.
+
     We'd like to study these files to understand the data better, and to check for any issues before we train on them.
 
 

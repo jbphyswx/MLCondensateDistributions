@@ -9,6 +9,7 @@ Test.@testset "MLCondensateDistributions Full Test Suite" begin
     include("test_dataset_builder_impl.jl")
     include("test_build_training_data.jl")
     include("test_data_hygiene.jl")
+    include("test_data_handling.jl")
     include("test_workflow_state.jl")
     include("test_vertical_coarsening.jl")
     include("test_array_utils.jl")

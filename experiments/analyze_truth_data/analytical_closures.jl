@@ -1,3 +1,11 @@
+#=
+    Planned closures for scorecards vs tabular truth or NN outputs. Implement from the cited papers;
+    TurbulenceConvection.jl (paths below) is an optional coding reference only, not a dependency.
+
+    Full implementations and model scorecards are intentionally deferred until EDA in
+    `experiments/analyze_truth_data/scripts/` shows which moments and regimes to match.
+=#
+
 """
     See /home/jbenjami/Research_Schneider/CliMA/TurbulenceConvection.jl/src/closures/sgs_condensate/SHOC/SHOC.jl (but do not assume it is correct or complete!)
 

@@ -10,7 +10,7 @@ module Viz
 using Dates: Dates
 
 export diagnostics_output_dir
-export plot_targets_vs_resolution, plot_targets_heatmaps
+export plot_targets_vs_resolution, plot_targets_heatmaps, plot_targets_binned_vs_x
 export plot_training_diagnostics_from_artifact
 
 """Return the diagnostics output directory, using `latest` unless timestamped output is requested."""
@@ -37,6 +37,11 @@ end
 """Plot resolution heatmaps for target columns. Requires CairoMakie via the package extension."""
 function plot_targets_heatmaps(args...; kwargs...)
     error("CairoMakie is required for plot_targets_heatmaps")
+end
+
+"""Plot binned median of each target vs a continuous x column. Requires CairoMakie via the package extension."""
+function plot_targets_binned_vs_x(args...; kwargs...)
+    error("CairoMakie is required for plot_targets_binned_vs_x")
 end
 
 """Render training diagnostics from a model artifact. Requires CairoMakie via the package extension."""
