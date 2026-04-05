@@ -127,6 +127,18 @@ Base.@kwdef struct TabularBuildOptions
     sliding_window_budget_h::Int = 5
 end
 
+function assert_known_nonqc_strategy(s::AbstractString)
+    mode = lowercase(strip(s))
+    if mode in ("full", "full_timestep", "auto", "per_span", "sparse", "minimal")
+        return nothing
+    end
+    throw(
+        ArgumentError(
+            "Unknown nonqc_strategy=$(repr(s)); use one of: auto, per_span, sparse, minimal, full, full_timestep.",
+        ),
+    )
+end
+
 """
     tabular_options_with(t::TabularBuildOptions; kwargs...)
 
@@ -149,6 +161,7 @@ function tabular_options_with(t::TabularBuildOptions;
     sliding_outputs_z = t.sliding_outputs_z,
     sliding_window_budget_h = t.sliding_window_budget_h,
 )
+    assert_known_nonqc_strategy(nonqc_strategy)
     return TabularBuildOptions(;
         coarsening_mode,
         fullcase_bytes_limit,
@@ -193,7 +206,7 @@ corresponding env-derived fields in a **single** construction (no extra copy).
 
 | Field | Environment variable |
 |-------|----------------------|
-| `coarsening_mode` | `MLCD_COARSENING_MODE` (`hybrid` default, `block`, `sliding`; legacy `binary` / `convolutional` warn once and map to `hybrid`) |
+| `coarsening_mode` | `MLCD_COARSENING_MODE` (`hybrid` default, `block`, `sliding`; unknown values **throw**) |
 | `fullcase_bytes_limit` | `MLCD_GOOGLELES_FULLCASE_BYTES_LIMIT` |
 | `force_fullcase` | `MLCD_GOOGLELES_FORCE_FULLCASE` |
 | `z_chunk_merge` | `MLCD_GOOGLELES_Z_CHUNK_MERGE` |
@@ -217,16 +230,13 @@ function tabular_build_options_from_env(; kw...)::TabularBuildOptions
         :block
     elseif coarsening_raw == "sliding"
         :sliding
-    elseif coarsening_raw in ("binary", "legacy_binary", "convolutional", "conv", "legacy_conv", "divisor_conv")
-        @warn(
-            "MLCD_COARSENING_MODE is $(repr(coarsening_raw)) (removed as a distinct mode); using :hybrid. " *
-            "Set MLCD_COARSENING_MODE=hybrid, block, or sliding explicitly. " *
-            "For a fixed list of 3D block factors from native grid extents, use :block with spatial_info :block_triples (see dataset builder docs).",
-            maxlog = 1,
-        )
-        :hybrid
     else
-        throw(ArgumentError("MLCD_COARSENING_MODE=$(repr(coarsening_raw)) is not recognized; use hybrid, block, or sliding."))
+        throw(
+            ArgumentError(
+                "MLCD_COARSENING_MODE=$(repr(coarsening_raw)) is not recognized; use hybrid, block, or sliding. " *
+                "Removed modes (e.g. convolutional, binary) are no longer accepted via env.",
+            ),
+        )
     end
     base = (;
         coarsening_mode = coarsening_mode,
@@ -245,7 +255,9 @@ function tabular_build_options_from_env(; kw...)::TabularBuildOptions
         sliding_outputs_z = max(1, parse(Int, get(ENV, "MLCD_SLIDING_OUTPUTS_Z", "2"))),
         sliding_window_budget_h = max(1, parse(Int, get(ENV, "MLCD_SLIDING_WINDOW_BUDGET_H", "5"))),
     )
-    return TabularBuildOptions(; merge(base, (; kw...))...)
+    opts = TabularBuildOptions(; merge(base, (; kw...))...)
+    assert_known_nonqc_strategy(opts.nonqc_strategy)
+    return opts
 end
 
 function case_arrow_filename(site_id::Int, month::Int, experiment::String)
@@ -661,6 +673,8 @@ transfer.
 - `auto` (default), `per_span`, `sparse`, `minimal` → per-span loads only.
 - `full`, `full_timestep` → one full-column materialization per cloudy timestep.
 
+Any other string **throws** [`ArgumentError`](@ref) (see [`assert_known_nonqc_strategy`](@ref)).
+
 `n_spans`, `n_keep`, `nz` are kept for call-site clarity and future policy hooks; they do not
 trigger full-column loads today.
 """
@@ -670,15 +684,9 @@ function _googleles_use_full_nonqc_timestep_load(
     nz::Int;
     nonqc_strategy::AbstractString="auto",
 )::Bool
+    assert_known_nonqc_strategy(nonqc_strategy)
     mode = lowercase(strip(nonqc_strategy))
-    if mode in ("full", "full_timestep")
-        return true
-    elseif mode in ("auto", "per_span", "sparse", "minimal")
-        return false
-    else
-        @warn "Unknown nonqc_strategy=$(repr(mode)); using per-span loads."
-        return false
-    end
+    return mode in ("full", "full_timestep")
 end
 
 """

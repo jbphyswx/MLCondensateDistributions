@@ -1,5 +1,8 @@
 using Test: Test
 
+# Load once: several test files need `ArrayUtils` without re-`include` (avoids duplicate-import warnings).
+include(joinpath(@__DIR__, "..", "utils", "array_utils.jl"))
+
 Test.@testset "MLCondensateDistributions Full Test Suite" begin
     include("test_dynamics.jl")
     include("test_dataset_builder.jl")

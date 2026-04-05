@@ -230,7 +230,7 @@ function _resolution_density_heatmap(df::DataFrames.DataFrame, res_col::Symbol, 
     return xvals, yedges, counts
 end
 
-function MLCondensateDistributions.Viz.plot_targets_vs_resolution(df::DataFrames.DataFrame, targets::Vector{Symbol}, res_col::Symbol, out_path::String)
+function MLCD.Viz.plot_targets_vs_resolution(df::DataFrames.DataFrame, targets::Vector{Symbol}, res_col::Symbol, out_path::String)
     n = length(targets)
     ncol = min(4, max(1, n))
     nrow = cld(n, ncol)
@@ -264,7 +264,7 @@ end
 """
 Plot 2D resolution heatmaps for each target and save the composite figure.
 """
-function MLCondensateDistributions.Viz.plot_targets_heatmaps(df::DataFrames.DataFrame, targets::Vector{Symbol}, out_path::String)
+function MLCD.Viz.plot_targets_heatmaps(df::DataFrames.DataFrame, targets::Vector{Symbol}, out_path::String)
     n = length(targets)
     ncol = min(3, max(1, n))
     nrow = cld(n, ncol)
@@ -330,7 +330,7 @@ end
 """
 Render the full diagnostics bundle from a trained model artifact.
 """
-function MLCondensateDistributions.Viz.plot_training_diagnostics_from_artifact(artifact, out_dir::String)
+function MLCD.Viz.plot_training_diagnostics_from_artifact(artifact, out_dir::String)
     feature_cols = Vector{Symbol}(artifact.feature_cols)
     target_cols = Vector{Symbol}(artifact.target_cols)
     x_test_raw = artifact.X_test_raw
@@ -359,7 +359,7 @@ end
 """
 Write the standard training diagnostics bundle for a model checkpoint.
 """
-function MLCondensateDistributions.write_training_diagnostics(model, ps, st, X_raw, X_std, Y_true, feature_cols, target_cols, loss_history, model_dir)
+function MLCD.write_training_diagnostics(model, ps, st, X_raw, X_std, Y_true, feature_cols, target_cols, loss_history, model_dir)
     out_dir = MLCD.Viz.diagnostics_output_dir(model_dir)
     y_pred, _ = model(X_std, ps, st)
 

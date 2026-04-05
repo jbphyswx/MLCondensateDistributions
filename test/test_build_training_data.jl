@@ -42,8 +42,10 @@ Test.@testset "tabular_build_options_from_env coarsening_mode" begin
     withenv("MLCD_COARSENING_MODE" => "sliding") do
         Test.@test MLCD.tabular_build_options_from_env().coarsening_mode === :sliding
     end
-    # Legacy shell exports should not hard-error (map to hybrid with @warn maxlog=1)
     withenv("MLCD_COARSENING_MODE" => "convolutional") do
-        Test.@test MLCD.tabular_build_options_from_env().coarsening_mode === :hybrid
+        Test.@test_throws ArgumentError MLCD.tabular_build_options_from_env()
+    end
+    withenv("MLCD_GOOGLELES_NONQC_STRATEGY" => "bogus_mode_xyz") do
+        Test.@test_throws ArgumentError MLCD.tabular_build_options_from_env()
     end
 end

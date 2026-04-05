@@ -93,9 +93,11 @@ Test.@testset "ReductionSpecs hybrid_sliding_extra_sizes_default skips sparse bl
 end
 
 Test.@testset "conv3d_block_mean 124×124×1 with fx=21 yields 5×5" begin
-    include("../utils/array_utils.jl")
-    using .ArrayUtils: conv3d_block_mean
+    if !isdefined(Main, :ArrayUtils)
+        include(joinpath(@__DIR__, "..", "utils", "array_utils.jl"))
+    end
+    using .ArrayUtils: ArrayUtils
     a = rand(Float32, 124, 124, 1)
-    b = conv3d_block_mean(a, 21, 21, 1)
+    b = ArrayUtils.conv3d_block_mean(a, 21, 21, 1)
     Test.@test size(b) == (5, 5, 1)
 end

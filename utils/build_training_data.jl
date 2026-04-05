@@ -177,6 +177,7 @@ function GoogleLES.build_tabular(
     tabular_options::TabularBuildOptions=TabularBuildOptions(),
 )
     opts = tabular_options
+    assert_known_nonqc_strategy(opts.nonqc_strategy)
     mkpath(output_dir)
     println("Processing GoogleLES case site=$(site_id) month=$(month) experiment=$(experiment)")
 
@@ -603,6 +604,7 @@ function cfSites.build_tabular(
     tabular_options::TabularBuildOptions=TabularBuildOptions(),
 )
     opts = tabular_options
+    assert_known_nonqc_strategy(opts.nonqc_strategy)
     mkpath(output_dir)
     println("Processing cfSites case site=$(cfSite_number) month=$(month) model=$(forcing_model) experiment=$(experiment)")
 
