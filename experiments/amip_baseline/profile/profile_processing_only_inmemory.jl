@@ -143,7 +143,7 @@ function run_impl_processing_only(cache, nt, metadata, spatial_info)
 
         metadata_t = copy(metadata)
         metadata_t[:timestep] = t_idx
-        df = MLCD.DatasetBuilderImpl.process_abstract_chunk_impl(fine_fields, metadata_t, spatial_info)
+        df = MLCD.DatasetBuilder.DatasetBuilderImpl.process_abstract_chunk_impl(fine_fields, metadata_t, spatial_info)
         rows += nrow(df)
     end
     return time() - t0, rows

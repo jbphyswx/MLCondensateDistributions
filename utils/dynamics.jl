@@ -1,6 +1,7 @@
 module Dynamics
 
-export TKE, KE, variance_from_moments, TKE_from_moments, 
+export TKE, KE, variance_from_moments, TKE_from_moments,
+    tke_field_from_velocity_moments!, tke_field_from_sum_sq_dev_uvw!,
     kinetic_energy, turbulent_kinetic_energy, turbulent_kinetic_energy_from_moments
 
 using Statistics: Statistics
@@ -110,6 +111,49 @@ end
     var_v = variance_from_moments(mean_sq_v, mean_v)
     var_w = variance_from_moments(mean_sq_w, mean_w)
     return FT(0.5) .* (var_u .+ var_v .+ var_w)
+end
+
+"""
+    tke_field_from_velocity_moments!(out, mean_sq_u, mean_u, mean_sq_v, mean_v, mean_sq_w, mean_w)
+
+In-place subgrid TKE field: `0.5 * (Var(u)+Var(v)+Var(w))` with `Var = ⟨·²⟩−⟨·⟩²` per voxel.
+"""
+@inline function tke_field_from_velocity_moments!(
+    out::AbstractArray{T, 3},
+    mean_sq_u::AbstractArray{T, 3},
+    mean_u::AbstractArray{T, 3},
+    mean_sq_v::AbstractArray{T, 3},
+    mean_v::AbstractArray{T, 3},
+    mean_sq_w::AbstractArray{T, 3},
+    mean_w::AbstractArray{T, 3},
+) where {T <: Real}
+    h = T(0.5)
+    @. out = h * ((mean_sq_u - mean_u * mean_u) + (mean_sq_v - mean_v * mean_v) + (mean_sq_w - mean_w * mean_w))
+    return out
+end
+
+"""
+    tke_field_from_sum_sq_dev_uvw!(out, sum_sq_dev_u, sum_sq_dev_v, sum_sq_dev_w, invn)
+
+In-place turbulent kinetic energy density field
+
+``\\mathrm{TKE} = \\tfrac{1}{2}\\bigl(\\mathrm{Var}(u)+\\mathrm{Var}(v)+\\mathrm{Var}(w)\\bigr)``
+
+when each velocity component’s **population variance** is ``\\mathrm{Var}(\\cdot) = S/n`` with
+``S = \\sum_i (x_i - \\bar{x})^2`` the **sum of squared deviations** about that component’s mean and
+`invn = 1/n` for the effective sample count `n` at each voxel. The arrays `sum_sq_dev_*` hold those
+sums ``S`` for `u`, `v`, and `w` (the same quantity often denoted **M2** in parallel-merge code).
+"""
+@inline function tke_field_from_sum_sq_dev_uvw!(
+    out::AbstractArray{T, 3},
+    sum_sq_dev_u::AbstractArray{T, 3},
+    sum_sq_dev_v::AbstractArray{T, 3},
+    sum_sq_dev_w::AbstractArray{T, 3},
+    invn::T,
+) where {T <: Real}
+    scale = T(0.5) * invn
+    @. out = scale * (sum_sq_dev_u + sum_sq_dev_v + sum_sq_dev_w)
+    return out
 end
 
 const kinetic_energy = KE

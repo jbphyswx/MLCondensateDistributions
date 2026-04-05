@@ -1,5 +1,7 @@
 using Test: Test
+using Arrow: Arrow
 using DataFrames: DataFrames
+using Random: Random
 using Statistics: Statistics
 
 include("../utils/coarse_graining.jl")
@@ -148,4 +150,64 @@ Test.@testset "GoogleLES metadata schema regression" begin
     Test.@test Statistics.minimum(z_levels) == 25.0f0
     Test.@test Statistics.maximum(z_levels) == 400.0f0
     Test.@test length(z_levels) >= 3
+end
+
+"""
+Naive per-voxel variance as `⟨x²⟩ − ⟨x⟩²` in Float32 can go **negative** from cancellation when the mean is
+large and fluctuations are tiny (see `scripts/welford_test.jl`). The dataset builder uses Chan/M2 merge and
+consistent `invn` scaling so emitted **`var_*` and `tke`** stay physically sensible. This test exercises that
+with a cancellation-prone mean level and checks an Arrow round-trip.
+"""
+Test.@testset "Emitted var_* / tke nonnegative (stress) + Arrow round-trip" begin
+    dims = (32, 32, 16)
+    rng = Random.MersenneTwister(2026)
+    fine_fields = Dict{String, AbstractArray{Float32, 3}}()
+
+    # Large-magnitude means + small noise: hostile to `mean_sq - mean^2` in Float32.
+    fine_fields["ta"] = 300.0f0 .+ 0.002f0 .* randn(rng, Float32, dims...)
+    fine_fields["thetali"] = 310.0f0 .+ 0.002f0 .* randn(rng, Float32, dims...)
+    fine_fields["hus"] = 0.01f0 .+ 1.0f-5 .* randn(rng, Float32, dims...)
+    for k in ["wa", "ua", "va", "pfull", "rhoa"]
+        fine_fields[k] = randn(rng, Float32, dims...)
+    end
+
+    cloud_w = zeros(Float32, dims...)
+    cloud_i = zeros(Float32, dims...)
+    cloud_w[1:6, 1:6, 5] .= 0.05f0
+    cloud_i[1:6, 1:6, 5] .= 0.01f0
+    fine_fields["clw"] = cloud_w
+    fine_fields["cli"] = cloud_i
+
+    metadata = Dict{Symbol, Any}(
+        :data_source => "Synth",
+        :month => 888,
+        :cfSite_number => 1,
+        :forcing_model => "Test",
+        :experiment => "amip",
+    )
+    spatial_info = Dict{Symbol, Any}(
+        :dx_native => 50.0f0,
+        :domain_h => 6000.0f0,
+        :min_h_resolution => 100.0f0,
+        :dz_native_profile => fill(25.0f0, 16),
+        :coarsening_mode => :hybrid,
+    )
+
+    df = DatasetBuilder.process_abstract_chunk(fine_fields, metadata, spatial_info)
+    Test.@test DataFrames.nrow(df) > 0
+
+    tol = 1.0f-5
+    for col in (:var_qt, :var_ql, :var_qi, :var_w, :var_h, :tke)
+        Test.@test all(df[!, col] .>= -tol)
+    end
+
+    mktempdir() do dir
+        path = joinpath(dir, "moments_stress.arrow")
+        Arrow.write(path, df)
+        df2 = DataFrames.DataFrame(Arrow.Table(path))
+        Test.@test names(df2) == names(df)
+        for col in (:var_qt, :var_ql, :var_qi, :var_w, :var_h, :tke)
+            Test.@test all(df2[!, col] .>= -tol)
+        end
+    end
 end

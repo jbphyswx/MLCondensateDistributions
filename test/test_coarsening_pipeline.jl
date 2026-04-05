@@ -6,6 +6,8 @@ if !isdefined(Main, :ArrayUtils)
     include(joinpath(@__DIR__, "..", "utils", "array_utils.jl"))
 end
 using .ArrayUtils: ArrayUtils
+include(joinpath(@__DIR__, "..", "utils", "statistical_methods", "StatisticalMethods.jl"))
+using .StatisticalMethods: StatisticalMethods
 include("../utils/coarsening_pipeline.jl")
 using .CoarseningPipeline: CoarseningPipeline
 

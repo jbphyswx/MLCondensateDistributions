@@ -39,4 +39,13 @@ Test.@testset "Dynamics TKE helpers" begin
     Test.@test tke_raw_default == tke_raw_explicit
     Test.@test tke_raw_default > 0f0
     Test.@test naive_signed_sum < 0f0
+
+    out = zeros(Float32, 1, 1, 1)
+    ms_u = fill(5.0f0, 1, 1, 1)
+    m_u = fill(2.0f0, 1, 1, 1)
+    Dynamics.tke_field_from_velocity_moments!(out, ms_u, m_u, ms_u, m_u, ms_u, m_u)
+    Test.@test out[1] ≈ Dynamics.TKE_from_moments(5.0f0, 2.0f0, 5.0f0, 2.0f0, 5.0f0, 2.0f0)
+    M2 = fill(3.0f0, 1, 1, 1)
+    Dynamics.tke_field_from_sum_sq_dev_uvw!(out, M2, M2, M2, 1.0f0 / 2.0f0)
+    Test.@test out[1] ≈ 0.5f0 * 0.5f0 * 9.0f0
 end

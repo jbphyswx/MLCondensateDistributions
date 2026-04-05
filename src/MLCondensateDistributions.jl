@@ -5,7 +5,7 @@ Package for generating coarse-grained LES training data and training Lux models
 for condensate and moment targets.
 
 Main exported surfaces:
-- Data/build modules: `Paths`, `WorkflowState`, `Dynamics`,
+- Data/build modules: `Paths`, `WorkflowState`, `Dynamics`, `StatisticalMethods`,
   `CoarseGraining`, `DatasetBuilder`, `GoogleLES`, `cfSites`.
 - Training/model APIs: `CondensateMLP`, `load_processed_data`,
   `standardize_data`, `train_model`.
@@ -24,6 +24,8 @@ include("../utils/paths.jl")
 include("../utils/workflow_state.jl")
 include("../utils/env_helpers.jl")
 include("../utils/dynamics.jl")
+include("../utils/statistical_methods/StatisticalMethods.jl")
+using .StatisticalMethods: StatisticalMethods
 include("../utils/coarse_graining.jl")
 include("../utils/analysis.jl")
 
@@ -60,7 +62,7 @@ method is provided by the extension.
 write_training_diagnostics(args...) = nothing
 
 # Export submodules for use in experiments
-export Paths, WorkflowState, Dynamics, CoarseGraining, DatasetBuilder, GoogleLES, cfSites
+export Paths, WorkflowState, Dynamics, StatisticalMethods, CoarseGraining, DatasetBuilder, GoogleLES, cfSites
 export TabularBuildOptions, tabular_build_options_from_env, tabular_options_with, tabular_build_options_summary
 export ReductionSpecs
 export DataHandling, Analysis, EnvHelpers, Common

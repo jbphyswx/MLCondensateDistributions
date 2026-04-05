@@ -32,6 +32,45 @@ function _compact_resolution_ticks(vals::AbstractVector{<:Real}; max_ticks::Int=
     return v[idx], [_resolution_tick_string(x) for x in v[idx]]
 end
 
+"""Makie heatmap edges for `n` cells of equal width in index space (avoids Cairo triangulation on irregular physical edges)."""
+function _uniform_index_edges(n::Int)
+    n <= 0 && return Float64[]
+    return collect(range(0.5, n + 0.5; length=n + 1))
+end
+
+"""
+Tick positions in **1-based index space** (cell centers `1..n`) with labels from sorted unique `xvals`.
+"""
+function _compact_resolution_index_ticks(xvals::Vector{Float64}; max_ticks::Int=14)
+    n = length(xvals)
+    n == 0 && return Float64[], String[]
+    if n <= max_ticks
+        return collect(1.0:n), [_resolution_tick_string(x) for x in xvals]
+    end
+    idx = unique(round.(Int, range(1, n; length=max_ticks)))
+    return Float64.(idx), [_resolution_tick_string(xvals[i]) for i in idx]
+end
+
+"""Sequential: white = zero log-count, dark blue = dense (not the moment value)."""
+function _log_density_colormap()
+    return CM.cgrad([:white, :lightsteelblue, :royalblue, :midnightblue]; categorical=false)
+end
+
+"""Diverging for signed quantities: blue (negative) → white (0) → red (positive); avoids viridis-style purple at an end."""
+function _covariance_diverging_colormap()
+    return CM.cgrad([:dodgerblue, :lightblue, :white, :wheat, :red]; categorical=false)
+end
+
+"""Sequential for nonnegative magnitudes: white (small) → amber → brown (no purple)."""
+function _sequential_positive_colormap()
+    return CM.cgrad([:white, :wheat, :goldenrod, :saddlebrown]; categorical=false)
+end
+
+"""Sequential for generic matrices (training diagnostics): light (low) → dark (high), discrete cells only."""
+function _matrix_sequential_colormap()
+    return CM.cgrad([:white, :gainsboro, :gray60, :gray15]; categorical=false)
+end
+
 """
 Group target columns into the `q_`, `var_`, and `cov_` subsets used by the diagnostics plots.
 """
@@ -139,12 +178,28 @@ function _plot_moment_heatmaps(target_cols::Vector{Symbol}, y_true::AbstractMatr
     fig = CM.Figure(size=(1200, 650))
 
     ax1 = CM.Axis(fig[1, 1], title="Truth Matrix (first $(n) samples)", xlabel="Sample", ylabel="Target")
-    hm1 = CM.heatmap!(ax1, 1:n, 1:length(target_cols), Float32.(yt); colorrange=(Float32(lo), Float32(hi)))
+    hm1 = CM.heatmap!(
+        ax1,
+        1:n,
+        1:length(target_cols),
+        Float32.(yt);
+        colormap=_matrix_sequential_colormap(),
+        colorrange=(Float32(lo), Float32(hi)),
+        interpolate=false,
+    )
     ax1.yticks = (1:length(target_cols), string.(target_cols))
     CM.Colorbar(fig[1, 2], hm1)
 
     ax2 = CM.Axis(fig[2, 1], title="Prediction Matrix (first $(n) samples)", xlabel="Sample", ylabel="Target")
-    hm2 = CM.heatmap!(ax2, 1:n, 1:length(target_cols), Float32.(yp); colorrange=(Float32(lo), Float32(hi)))
+    hm2 = CM.heatmap!(
+        ax2,
+        1:n,
+        1:length(target_cols),
+        Float32.(yp);
+        colormap=_matrix_sequential_colormap(),
+        colorrange=(Float32(lo), Float32(hi)),
+        interpolate=false,
+    )
     ax2.yticks = (1:length(target_cols), string.(target_cols))
     CM.Colorbar(fig[2, 2], hm2)
 
@@ -232,8 +287,13 @@ function _resolution_density_heatmap(df::DataFrames.DataFrame, res_col::Symbol, 
     yvals = Float64.(df[!, target])
     ylo, yhi = MLCD.Common.robust_limits(yvals; qlo=0.01, qhi=0.99)
     if ylo == yhi
-        ylo -= 0.5
-        yhi += 0.5
+        if startswith(String(target), "var_")
+            ylo = max(0.0, ylo - 0.5)
+            yhi = yhi + 0.5
+        else
+            ylo -= 0.5
+            yhi += 0.5
+        end
     end
 
     yedges = collect(range(ylo, yhi; length=nbins + 1))
@@ -268,17 +328,33 @@ function MLCD.Viz.plot_targets_vs_resolution(df::DataFrames.DataFrame, targets::
         ax = CM.Axis(fig[r, plot_col], title=String(target), xlabel=String(res_col), ylabel=String(target))
 
         xvals, yedges, counts = _resolution_density_heatmap(df, res_col, target)
-        xedges = MLCD.Common.centers_to_edges(xvals)
         density = log10.(counts .+ 1)
-        hm = CM.heatmap!(ax, xedges, yedges, permutedims(density); colormap=:viridis, interpolate=false)
+        nx = size(counts, 2)
+        mat = permutedims(density)
+        xe_idx = _uniform_index_edges(nx)
+        hm = CM.heatmap!(
+            ax,
+            xe_idx,
+            yedges,
+            mat;
+            colormap=_log_density_colormap(),
+            colorrange=(0.0, max(1e-6, Float64(Statistics.maximum(mat)))),
+            interpolate=false,
+        )
         CM.Colorbar(fig[r, cb_col], hm)
-        tx, tl = _compact_resolution_ticks(xvals; max_ticks=14)
-        ax.xticks = (tx, tl)
+        tx_pos, tx_lab = _compact_resolution_index_ticks(xvals; max_ticks=14)
+        ax.xticks = (tx_pos, tx_lab)
 
         g = MLCD.Analysis.group_reduce(df, [res_col], target; reducer=Statistics.median, output_col=:median)
-        x = Float64.(g[!, res_col])
-        y = Float64.(g[!, :median])
-        CM.scatter!(ax, x, y, color=:black, markersize=7)
+        x_raw = Float64.(g[!, res_col])
+        y_med = Float64.(g[!, :median])
+        col_to_i = Dict(Float64(xvals[j]) => Float64(j) for j in eachindex(xvals))
+        x_idx = Float64[col_to_i[xr] for xr in x_raw]
+        CM.scatter!(ax, x_idx, y_med; color=:black, markersize=7)
+
+        if startswith(String(target), "cov_")
+            CM.hlines!(ax, 0.0; color=(:black, 0.45), linestyle=:dash, linewidth=1.2)
+        end
     end
 
     mkpath(dirname(out_path))
@@ -320,52 +396,84 @@ function MLCD.Viz.plot_targets_heatmaps(df::DataFrames.DataFrame, targets::Vecto
                 finite_vals = [v for v in z if isfinite(v)]
                 maxabs = isempty(finite_vals) ? 1f0 : Statistics.maximum(abs, finite_vals)
                 cr = isfinite(maxabs) && maxabs > 0 ? (-maxabs, maxabs) : (-1f0, 1f0)
-                pts = CM.scatter!(ax, x, y; color=z, colormap=:balance, colorrange=cr, markersize=sizes)
+                pts = CM.scatter!(
+                    ax,
+                    x,
+                    y;
+                    color=z,
+                    colormap=_covariance_diverging_colormap(),
+                    colorrange=cr,
+                    markersize=sizes,
+                )
                 CM.Colorbar(fig[r, cb_col], pts)
             else
-                pts = CM.scatter!(ax, x, y; color=z, colormap=:viridis, markersize=sizes)
+                finite_z = [v for v in z if isfinite(v)]
+                cr_seq = if isempty(finite_z)
+                    (0.0, 1.0)
+                else
+                    loz, hiz = Statistics.extrema(finite_z)
+                    loz == hiz ? (Float64(loz - 1), Float64(loz + 1)) : (Float64(loz), Float64(hiz))
+                end
+                pts = CM.scatter!(
+                    ax,
+                    x,
+                    y;
+                    color=z,
+                    colormap=_sequential_positive_colormap(),
+                    colorrange=cr_seq,
+                    markersize=sizes,
+                )
                 CM.Colorbar(fig[r, cb_col], pts)
             end
         else
             hs, zs, mat = MLCD.Analysis.build_heatmap_matrix(df, :resolution_h, :resolution_z, target; reducer=Statistics.median)
-            xedges = MLCD.Common.centers_to_edges(hs)
-            yedges = MLCD.Common.centers_to_edges(zs)
-            # `mat` is [resolution_z, resolution_h] (rows = z, cols = h). Makie heatmap!(xedges, yedges, M) expects
-            # size(M,1) == length(xedges)-1 and size(M,2) == length(yedges)-1, so M must be [h, z].
+            # Uniform index edges: irregular physical dz/dh spacing confuses Cairo heatmap meshing (diagonal shards).
             mat_xy = permutedims(mat)
+            nh, nz = size(mat_xy)
+            xe_idx = _uniform_index_edges(nh)
+            ye_idx = _uniform_index_edges(nz)
 
             if startswith(String(target), "cov_")
                 finite_vals = [x for x in vec(mat) if isfinite(x)]
                 maxabs = isempty(finite_vals) ? 1f0 : Statistics.maximum(abs, finite_vals)
-                cr = isfinite(maxabs) && maxabs > 0 ? (-maxabs, maxabs) : (-1f0, 1f0)
+                cr = isfinite(maxabs) && maxabs > 0 ? (-Float64(maxabs), Float64(maxabs)) : (-1.0, 1.0)
                 hm = CM.heatmap!(
                     ax,
-                    xedges,
-                    yedges,
+                    xe_idx,
+                    ye_idx,
                     mat_xy;
-                    colormap=:balance,
+                    colormap=_covariance_diverging_colormap(),
                     colorrange=cr,
                     interpolate=false,
                     nan_color=:lightgray,
                 )
                 CM.Colorbar(fig[r, cb_col], hm)
             else
+                finite_m = [v for v in vec(mat_xy) if isfinite(v)]
+                cr_var = if isempty(finite_m)
+                    (0.0, 1.0)
+                else
+                    lo = Float64(Statistics.minimum(finite_m))
+                    hi = Float64(Statistics.maximum(finite_m))
+                    lo == hi ? (lo - 1.0, hi + 1.0) : (lo, hi)
+                end
                 hm = CM.heatmap!(
                     ax,
-                    xedges,
-                    yedges,
+                    xe_idx,
+                    ye_idx,
                     mat_xy;
-                    colormap=:viridis,
+                    colormap=_sequential_positive_colormap(),
+                    colorrange=cr_var,
                     interpolate=false,
                     nan_color=:lightgray,
                 )
                 CM.Colorbar(fig[r, cb_col], hm)
             end
 
-            hx, hl = _compact_resolution_ticks(hs; max_ticks=12)
-            zx, zl = _compact_resolution_ticks(zs; max_ticks=12)
-            ax.xticks = (hx, hl)
-            ax.yticks = (zx, zl)
+            hx_pos, hx_lab = _compact_resolution_index_ticks(hs; max_ticks=12)
+            zx_pos, zx_lab = _compact_resolution_index_ticks(zs; max_ticks=12)
+            ax.xticks = (hx_pos, hx_lab)
+            ax.yticks = (zx_pos, zx_lab)
         end
     end
 
@@ -457,7 +565,14 @@ function _plot_feature_matrix(X_raw::AbstractMatrix{<:Real}, feature_cols::Vecto
     n = min(size(X_raw, 2), 400)
     fig = CM.Figure(size=(1000, 500))
     ax = CM.Axis(fig[1, 1], title="Feature Matrix (first $(n) samples)", xlabel="Sample", ylabel="Feature")
-    hm = CM.heatmap!(ax, 1:n, 1:length(feature_cols), Float32.(X_raw[:, 1:n]))
+    hm = CM.heatmap!(
+        ax,
+        1:n,
+        1:length(feature_cols),
+        Float32.(X_raw[:, 1:n]);
+        colormap=_matrix_sequential_colormap(),
+        interpolate=false,
+    )
     ax.yticks = (1:length(feature_cols), string.(feature_cols))
     CM.Colorbar(fig[1, 2], hm)
     CM.save(joinpath(out_dir, "feature_matrix_examples.png"), fig)
@@ -465,7 +580,15 @@ function _plot_feature_matrix(X_raw::AbstractMatrix{<:Real}, feature_cols::Vecto
     corr_mat = Statistics.cor(permutedims(Float32.(X_raw[:, 1:n])))
     fig2 = CM.Figure(size=(700, 600))
     ax2 = CM.Axis(fig2[1, 1], title="Feature Correlation", xlabel="Feature", ylabel="Feature")
-    hm2 = CM.heatmap!(ax2, 1:length(feature_cols), 1:length(feature_cols), corr_mat)
+    hm2 = CM.heatmap!(
+        ax2,
+        1:length(feature_cols),
+        1:length(feature_cols),
+        corr_mat;
+        colormap=_covariance_diverging_colormap(),
+        colorrange=(-1.0, 1.0),
+        interpolate=false,
+    )
     ax2.xticks = (1:length(feature_cols), string.(feature_cols))
     ax2.yticks = (1:length(feature_cols), string.(feature_cols))
     CM.Colorbar(fig2[1, 2], hm2)
@@ -480,12 +603,34 @@ function _plot_truth_pred(Y_true::AbstractMatrix{<:Real}, Y_pred::AbstractMatrix
 
     fig = CM.Figure(size=(1000, 500))
     ax1 = CM.Axis(fig[1, 1], title="Truth Matrix (first $(n) samples)", xlabel="Sample", ylabel="Target")
-    hm1 = CM.heatmap!(ax1, 1:n, 1:length(target_cols), Float32.(Y_true[:, 1:n]))
+    lo_m, hi_m = MLCD.Common.robust_limits(
+        vcat(vec(Float64.(Y_true[:, 1:n])), vec(Float64.(Y_pred[:, 1:n])));
+        qlo=0.01,
+        qhi=0.99,
+    )
+    cr_m = (Float32(lo_m), Float32(hi_m))
+    hm1 = CM.heatmap!(
+        ax1,
+        1:n,
+        1:length(target_cols),
+        Float32.(Y_true[:, 1:n]);
+        colormap=_matrix_sequential_colormap(),
+        colorrange=cr_m,
+        interpolate=false,
+    )
     ax1.yticks = (1:length(target_cols), string.(target_cols))
     CM.Colorbar(fig[1, 2], hm1)
 
     ax2 = CM.Axis(fig[2, 1], title="Prediction Matrix (first $(n) samples)", xlabel="Sample", ylabel="Target")
-    hm2 = CM.heatmap!(ax2, 1:n, 1:length(target_cols), Float32.(Y_pred[:, 1:n]))
+    hm2 = CM.heatmap!(
+        ax2,
+        1:n,
+        1:length(target_cols),
+        Float32.(Y_pred[:, 1:n]);
+        colormap=_matrix_sequential_colormap(),
+        colorrange=cr_m,
+        interpolate=false,
+    )
     ax2.yticks = (1:length(target_cols), string.(target_cols))
     CM.Colorbar(fig[2, 2], hm2)
     CM.save(joinpath(out_dir, "truth_pred_matrices.png"), fig)

@@ -1,13 +1,13 @@
 module DatasetBuilderImpl
 
 using DataFrames: DataFrames
-using ..DatasetBuilder: DatasetBuilder
+using ..DatasetBuilder: DatasetBuilder, StatisticalMethods
 using ..CoarseGraining: CoarseGraining
 using ..Dynamics: Dynamics
 
 include("coarsening_pipeline.jl")
 using .CoarseningPipeline
-using ..ReductionSpecs
+using ..ReductionSpecs: ReductionSpecs
 
 export process_abstract_chunk_impl
 
@@ -105,24 +105,6 @@ end
 
 @inline function _as_f32_array3(x::AbstractArray{<:Real, 3})
     return Float32.(x)
-end
-
-@inline function _covariance_from_moments!(out::AbstractArray{T, 3}, mean_xy::AbstractArray{T, 3}, mean_x::AbstractArray{T, 3}, mean_y::AbstractArray{T, 3}) where {T <: Real}
-    @inbounds for idx in eachindex(out)
-        out[idx] = mean_xy[idx] - mean_x[idx] * mean_y[idx]
-    end
-    return out
-end
-
-@inline function _tke_from_moments!(out::AbstractArray{T, 3}, mean_sq_u::AbstractArray{T, 3}, mean_u::AbstractArray{T, 3}, mean_sq_v::AbstractArray{T, 3}, mean_v::AbstractArray{T, 3}, mean_sq_w::AbstractArray{T, 3}, mean_w::AbstractArray{T, 3}) where {T <: Real}
-    half = T(0.5)
-    @inbounds for idx in eachindex(out)
-        var_u = mean_sq_u[idx] - mean_u[idx] * mean_u[idx]
-        var_v = mean_sq_v[idx] - mean_v[idx] * mean_v[idx]
-        var_w = mean_sq_w[idx] - mean_w[idx] * mean_w[idx]
-        out[idx] = half * (var_u + var_v + var_w)
-    end
-    return out
 end
 
 @inline function _all_finite_emitted_diagnostics(
@@ -367,15 +349,14 @@ end
 
 
 """
-Build horizontally coarsened means/products for every `nh` appearing in `triples`, reusing the
-largest cached divisor `s | nh` among **already-built** scales and pooling by `nh÷s` (tower /
-composition: e.g. 60 from 20×3 when `means_h[20]` exists). `triples` should be processed with
-`nhs` sorted ascending (as here). Vertical `fz` is applied later per triple via
-`coarsen_*_vertical_at_level`.
+Build horizontally coarsened means and **central moment sums** (`M2` / `C`) for every `nh` in
+`triples`, reusing the largest cached divisor `s | nh` and Chan–Pebay merge (not mean-pooling of
+`⟨x²⟩`). See `docs/MOMENTS_NUMERICS_PIPELINE.md`. Vertical `fz` is applied later per triple.
 """
 function _block_truncated_horizontal_cache!(
     means_h::Dict{Int, NamedTuple},
-    prods_h::Dict{Int, NamedTuple},
+    moments_h::Dict{Int, NamedTuple},
+    n_samples_h::Dict{Int, Int},
     fields::NamedTuple,
     product_pairs::NamedTuple,
     triples::Vector{NTuple{3,Int}},
@@ -395,15 +376,27 @@ function _block_truncated_horizontal_cache!(
             r = div(nh, best_src)
             CoarseningPipeline.coarsen_fields_at_level(means_h[best_src], r, r)
         end
-        prods = if best_src == 0
-            CoarseningPipeline.coarsen_products_at_level(fields, product_pairs, nh, nh)
+        moments = if best_src == 0
+            CoarseningPipeline.coarsen_products_moments_horizontal_native(fields, product_pairs, nh)
         else
             r = div(nh, best_src)
-            # Cached entries are already `<x*y>` means; pool them horizontally like plain fields.
-            CoarseningPipeline.coarsen_fields_at_level(prods_h[best_src], r, r)
+            CoarseningPipeline.coarsen_moments_horizontal_merge(
+                means_h[best_src],
+                moments_h[best_src],
+                product_pairs,
+                r,
+                r,
+                n_samples_h[best_src],
+            )
         end
         means_h[nh] = means
-        prods_h[nh] = prods
+        moments_h[nh] = moments
+        n_samples_h[nh] = if best_src == 0
+            nh * nh
+        else
+            r = div(nh, best_src)
+            n_samples_h[best_src] * r * r
+        end
         push!(done, nh)
     end
     return nothing
@@ -431,7 +424,7 @@ function _process_abstract_chunk_block_truncated(
     explicit_block = _spatial_lookup(spatial_info, :block_triples, nothing)
     h_budget = Int(_spatial_lookup(spatial_info, :sliding_window_budget_h, 5))
     triples = if explicit_block === nothing
-        block_reduction_triples(
+        ReductionSpecs.block_reduction_triples(
             nx,
             ny,
             nz,
@@ -447,22 +440,29 @@ function _process_abstract_chunk_block_truncated(
     end
     square_triples = all(t -> t[1] == t[2], triples)
     means_h = Dict{Int, NamedTuple}()
-    prods_h = Dict{Int, NamedTuple}()
+    moments_h = Dict{Int, NamedTuple}()
+    n_samples_h = Dict{Int, Int}()
     if square_triples
-        _block_truncated_horizontal_cache!(means_h, prods_h, fields, product_pairs, triples)
+        _block_truncated_horizontal_cache!(means_h, moments_h, n_samples_h, fields, product_pairs, triples)
     end
     future_z_empty = Int[]
     out_acc = nothing
     for (fx, fy, fz) in triples
-        means, prods = if square_triples
-            (
-                CoarseningPipeline.coarsen_fields_vertical_at_level(means_h[fx], fz),
-                CoarseningPipeline.coarsen_products_vertical_at_level(prods_h[fx], fz),
+        means, prods, n_population = if square_triples
+            m_vert = CoarseningPipeline.coarsen_fields_vertical_at_level(means_h[fx], fz)
+            mom_vert = CoarseningPipeline.coarsen_moments_vertical_merge(
+                means_h[fx],
+                moments_h[fx],
+                product_pairs,
+                fz,
+                n_samples_h[fx],
             )
+            (m_vert, mom_vert, n_samples_h[fx] * fz)
         else
             (
-                coarsen_fields_3d_block(fields, fx, fy, fz),
-                coarsen_products_3d_block(fields, product_pairs, fx, fy, fz),
+                CoarseningPipeline.coarsen_fields_3d_block(fields, fx, fy, fz),
+                CoarseningPipeline.coarsen_products_moments_3d_block(fields, product_pairs, fx, fy, fz),
+                fx * fy * fz,
             )
         end
         c_qt = _field_get(means, :hus)
@@ -553,17 +553,11 @@ function _process_abstract_chunk_block_truncated(
         nx_z, ny_z, nz_z = size(v_ql)
         ir, jr, kr = Base.OneTo(nx_z), Base.OneTo(ny_z), Base.OneTo(nz_z)
         tke = view(diag_tke, ir, jr, kr)
-        _tke_from_moments!(tke, v_prod_u_u, v_u, v_prod_v_v, v_v, v_prod_w_w, v_w)
         var_qt = view(diag_var_qt, ir, jr, kr)
         var_ql = view(diag_var_ql, ir, jr, kr)
         var_qi = view(diag_var_qi, ir, jr, kr)
         var_w = view(diag_var_w, ir, jr, kr)
         var_h = view(diag_var_h, ir, jr, kr)
-        _covariance_from_moments!(var_qt, v_prod_qt_qt, v_qt, v_qt)
-        _covariance_from_moments!(var_ql, v_prod_ql_ql, v_ql, v_ql)
-        _covariance_from_moments!(var_qi, v_prod_qi_qi, v_qi, v_qi)
-        _covariance_from_moments!(var_w, v_prod_w_w, v_w, v_w)
-        _covariance_from_moments!(var_h, v_prod_h_h, v_h, v_h)
         cov_qt_ql = view(diag_cov_qt_ql, ir, jr, kr)
         cov_qt_qi = view(diag_cov_qt_qi, ir, jr, kr)
         cov_qt_w = view(diag_cov_qt_w, ir, jr, kr)
@@ -574,16 +568,23 @@ function _process_abstract_chunk_block_truncated(
         cov_qi_w = view(diag_cov_qi_w, ir, jr, kr)
         cov_qi_h = view(diag_cov_qi_h, ir, jr, kr)
         cov_w_h = view(diag_cov_w_h, ir, jr, kr)
-        _covariance_from_moments!(cov_qt_ql, v_prod_qt_ql, v_qt, v_ql)
-        _covariance_from_moments!(cov_qt_qi, v_prod_qt_qi, v_qt, v_qi)
-        _covariance_from_moments!(cov_qt_w, v_prod_qt_w, v_qt, v_w)
-        _covariance_from_moments!(cov_qt_h, v_prod_qt_h, v_qt, v_h)
-        _covariance_from_moments!(cov_ql_qi, v_prod_ql_qi, v_ql, v_qi)
-        _covariance_from_moments!(cov_ql_w, v_prod_ql_w, v_ql, v_w)
-        _covariance_from_moments!(cov_ql_h, v_prod_ql_h, v_ql, v_h)
-        _covariance_from_moments!(cov_qi_w, v_prod_qi_w, v_qi, v_w)
-        _covariance_from_moments!(cov_qi_h, v_prod_qi_h, v_qi, v_h)
-        _covariance_from_moments!(cov_w_h, v_prod_w_h, v_w, v_h)
+        invn = one(FT) / FT(n_population)
+        Dynamics.tke_field_from_sum_sq_dev_uvw!(tke, v_prod_u_u, v_prod_v_v, v_prod_w_w, invn)
+        @. var_qt = v_prod_qt_qt * invn
+        @. var_ql = v_prod_ql_ql * invn
+        @. var_qi = v_prod_qi_qi * invn
+        @. var_w = v_prod_w_w * invn
+        @. var_h = v_prod_h_h * invn
+        @. cov_qt_ql = v_prod_qt_ql * invn
+        @. cov_qt_qi = v_prod_qt_qi * invn
+        @. cov_qt_w = v_prod_qt_w * invn
+        @. cov_qt_h = v_prod_qt_h * invn
+        @. cov_ql_qi = v_prod_ql_qi * invn
+        @. cov_ql_w = v_prod_ql_w * invn
+        @. cov_ql_h = v_prod_ql_h * invn
+        @. cov_qi_w = v_prod_qi_w * invn
+        @. cov_qi_h = v_prod_qi_h * invn
+        @. cov_w_h = v_prod_w_h * invn
         empty_z_levels = CoarseGraining.identify_empty_z_levels_from_ql_qi(v_ql, v_qi, cloud_threshold)
         z_keep_mask = CoarseGraining.build_z_level_keep_mask(empty_z_levels, fz, future_z_empty)
         any(z_keep_mask) || continue
@@ -702,7 +703,7 @@ function _process_abstract_chunk_sliding(
     kz = Int(_spatial_lookup(spatial_info, :sliding_outputs_z, 2))
     win_budget = Int(_spatial_lookup(spatial_info, :sliding_window_budget_h, 5))
     dz_ref = FT(sum(dz_native) / length(dz_native))
-    triples = sliding_reduction_triples(
+    triples = ReductionSpecs.sliding_reduction_triples(
         nx,
         ny,
         nz,
@@ -817,17 +818,17 @@ function _process_abstract_chunk_sliding(
         nx_z, ny_z, nz_z = size(v_ql)
         ir, jr, kr = Base.OneTo(nx_z), Base.OneTo(ny_z), Base.OneTo(nz_z)
         tke = view(diag_tke, ir, jr, kr)
-        _tke_from_moments!(tke, v_prod_u_u, v_u, v_prod_v_v, v_v, v_prod_w_w, v_w)
+        Dynamics.tke_field_from_velocity_moments!(tke, v_prod_u_u, v_u, v_prod_v_v, v_v, v_prod_w_w, v_w)
         var_qt = view(diag_var_qt, ir, jr, kr)
         var_ql = view(diag_var_ql, ir, jr, kr)
         var_qi = view(diag_var_qi, ir, jr, kr)
         var_w = view(diag_var_w, ir, jr, kr)
         var_h = view(diag_var_h, ir, jr, kr)
-        _covariance_from_moments!(var_qt, v_prod_qt_qt, v_qt, v_qt)
-        _covariance_from_moments!(var_ql, v_prod_ql_ql, v_ql, v_ql)
-        _covariance_from_moments!(var_qi, v_prod_qi_qi, v_qi, v_qi)
-        _covariance_from_moments!(var_w, v_prod_w_w, v_w, v_w)
-        _covariance_from_moments!(var_h, v_prod_h_h, v_h, v_h)
+        StatisticalMethods.covariance_from_moments!(var_qt, v_prod_qt_qt, v_qt, v_qt)
+        StatisticalMethods.covariance_from_moments!(var_ql, v_prod_ql_ql, v_ql, v_ql)
+        StatisticalMethods.covariance_from_moments!(var_qi, v_prod_qi_qi, v_qi, v_qi)
+        StatisticalMethods.covariance_from_moments!(var_w, v_prod_w_w, v_w, v_w)
+        StatisticalMethods.covariance_from_moments!(var_h, v_prod_h_h, v_h, v_h)
         cov_qt_ql = view(diag_cov_qt_ql, ir, jr, kr)
         cov_qt_qi = view(diag_cov_qt_qi, ir, jr, kr)
         cov_qt_w = view(diag_cov_qt_w, ir, jr, kr)
@@ -838,16 +839,16 @@ function _process_abstract_chunk_sliding(
         cov_qi_w = view(diag_cov_qi_w, ir, jr, kr)
         cov_qi_h = view(diag_cov_qi_h, ir, jr, kr)
         cov_w_h = view(diag_cov_w_h, ir, jr, kr)
-        _covariance_from_moments!(cov_qt_ql, v_prod_qt_ql, v_qt, v_ql)
-        _covariance_from_moments!(cov_qt_qi, v_prod_qt_qi, v_qt, v_qi)
-        _covariance_from_moments!(cov_qt_w, v_prod_qt_w, v_qt, v_w)
-        _covariance_from_moments!(cov_qt_h, v_prod_qt_h, v_qt, v_h)
-        _covariance_from_moments!(cov_ql_qi, v_prod_ql_qi, v_ql, v_qi)
-        _covariance_from_moments!(cov_ql_w, v_prod_ql_w, v_ql, v_w)
-        _covariance_from_moments!(cov_ql_h, v_prod_ql_h, v_ql, v_h)
-        _covariance_from_moments!(cov_qi_w, v_prod_qi_w, v_qi, v_w)
-        _covariance_from_moments!(cov_qi_h, v_prod_qi_h, v_qi, v_h)
-        _covariance_from_moments!(cov_w_h, v_prod_w_h, v_w, v_h)
+        StatisticalMethods.covariance_from_moments!(cov_qt_ql, v_prod_qt_ql, v_qt, v_ql)
+        StatisticalMethods.covariance_from_moments!(cov_qt_qi, v_prod_qt_qi, v_qt, v_qi)
+        StatisticalMethods.covariance_from_moments!(cov_qt_w, v_prod_qt_w, v_qt, v_w)
+        StatisticalMethods.covariance_from_moments!(cov_qt_h, v_prod_qt_h, v_qt, v_h)
+        StatisticalMethods.covariance_from_moments!(cov_ql_qi, v_prod_ql_qi, v_ql, v_qi)
+        StatisticalMethods.covariance_from_moments!(cov_ql_w, v_prod_ql_w, v_ql, v_w)
+        StatisticalMethods.covariance_from_moments!(cov_ql_h, v_prod_ql_h, v_ql, v_h)
+        StatisticalMethods.covariance_from_moments!(cov_qi_w, v_prod_qi_w, v_qi, v_w)
+        StatisticalMethods.covariance_from_moments!(cov_qi_h, v_prod_qi_h, v_qi, v_h)
+        StatisticalMethods.covariance_from_moments!(cov_w_h, v_prod_w_h, v_w, v_h)
         empty_z_levels = CoarseGraining.identify_empty_z_levels_from_ql_qi(v_ql, v_qi, cloud_threshold)
         z_keep_mask = CoarseGraining.build_z_level_keep_mask(empty_z_levels, wz, future_z_empty)
         any(z_keep_mask) || continue
@@ -981,7 +982,7 @@ function _process_abstract_chunk_hybrid(
     win_budget = Int(_spatial_lookup(spatial_info, :sliding_window_budget_h, 5))
     extra = _spatial_lookup(spatial_info, :hybrid_sliding_extra_sizes, nothing)
     dz_ref = FT(sum(dz_native) / length(dz_native))
-    triples_block = block_reduction_triples(
+    triples_block = ReductionSpecs.block_reduction_triples(
         nx,
         ny,
         nz,
@@ -994,7 +995,7 @@ function _process_abstract_chunk_hybrid(
     )
     block_nhs = Set{Int}(t[1] for t in triples_block)
     win_extra = if extra === nothing
-        hybrid_sliding_extra_sizes_default(
+        ReductionSpecs.hybrid_sliding_extra_sizes_default(
             nx,
             ny,
             dx_native,
@@ -1007,7 +1008,7 @@ function _process_abstract_chunk_hybrid(
     end
     isempty(win_extra) && return df_b
     block_fzs = Set{Int}(t[3] for t in triples_block)
-    win_extra_z = hybrid_sliding_extra_vertical_default(
+    win_extra_z = ReductionSpecs.hybrid_sliding_extra_vertical_default(
         nz,
         dz_ref,
         FT(max_dz),
@@ -1015,9 +1016,9 @@ function _process_abstract_chunk_hybrid(
         budget = win_budget,
     )
     if isempty(win_extra_z)
-        fz_top = effective_fz_max(nz, dz_ref, FT(max_dz))
+        fz_top = ReductionSpecs.effective_fz_max(nz, dz_ref, FT(max_dz))
         if fz_top >= 1
-            win_extra_z = filter(w -> !(w in block_fzs), subsample_closed_range(1, fz_top, win_budget))
+            win_extra_z = filter(w -> !(w in block_fzs), ReductionSpecs.subsample_closed_range(1, fz_top, win_budget))
         end
     end
     isempty(win_extra_z) && return df_b
@@ -1126,17 +1127,17 @@ function _process_abstract_chunk_hybrid(
             nx_z, ny_z, nz_z = size(v_ql)
             ir, jr, kr = Base.OneTo(nx_z), Base.OneTo(ny_z), Base.OneTo(nz_z)
             tke = view(diag_tke, ir, jr, kr)
-            _tke_from_moments!(tke, v_prod_u_u, v_u, v_prod_v_v, v_v, v_prod_w_w, v_w)
+            Dynamics.tke_field_from_velocity_moments!(tke, v_prod_u_u, v_u, v_prod_v_v, v_v, v_prod_w_w, v_w)
             var_qt = view(diag_var_qt, ir, jr, kr)
             var_ql = view(diag_var_ql, ir, jr, kr)
             var_qi = view(diag_var_qi, ir, jr, kr)
             var_w = view(diag_var_w, ir, jr, kr)
             var_h = view(diag_var_h, ir, jr, kr)
-            _covariance_from_moments!(var_qt, v_prod_qt_qt, v_qt, v_qt)
-            _covariance_from_moments!(var_ql, v_prod_ql_ql, v_ql, v_ql)
-            _covariance_from_moments!(var_qi, v_prod_qi_qi, v_qi, v_qi)
-            _covariance_from_moments!(var_w, v_prod_w_w, v_w, v_w)
-            _covariance_from_moments!(var_h, v_prod_h_h, v_h, v_h)
+            StatisticalMethods.covariance_from_moments!(var_qt, v_prod_qt_qt, v_qt, v_qt)
+            StatisticalMethods.covariance_from_moments!(var_ql, v_prod_ql_ql, v_ql, v_ql)
+            StatisticalMethods.covariance_from_moments!(var_qi, v_prod_qi_qi, v_qi, v_qi)
+            StatisticalMethods.covariance_from_moments!(var_w, v_prod_w_w, v_w, v_w)
+            StatisticalMethods.covariance_from_moments!(var_h, v_prod_h_h, v_h, v_h)
             cov_qt_ql = view(diag_cov_qt_ql, ir, jr, kr)
             cov_qt_qi = view(diag_cov_qt_qi, ir, jr, kr)
             cov_qt_w = view(diag_cov_qt_w, ir, jr, kr)
@@ -1147,16 +1148,16 @@ function _process_abstract_chunk_hybrid(
             cov_qi_w = view(diag_cov_qi_w, ir, jr, kr)
             cov_qi_h = view(diag_cov_qi_h, ir, jr, kr)
             cov_w_h = view(diag_cov_w_h, ir, jr, kr)
-            _covariance_from_moments!(cov_qt_ql, v_prod_qt_ql, v_qt, v_ql)
-            _covariance_from_moments!(cov_qt_qi, v_prod_qt_qi, v_qt, v_qi)
-            _covariance_from_moments!(cov_qt_w, v_prod_qt_w, v_qt, v_w)
-            _covariance_from_moments!(cov_qt_h, v_prod_qt_h, v_qt, v_h)
-            _covariance_from_moments!(cov_ql_qi, v_prod_ql_qi, v_ql, v_qi)
-            _covariance_from_moments!(cov_ql_w, v_prod_ql_w, v_ql, v_w)
-            _covariance_from_moments!(cov_ql_h, v_prod_ql_h, v_ql, v_h)
-            _covariance_from_moments!(cov_qi_w, v_prod_qi_w, v_qi, v_w)
-            _covariance_from_moments!(cov_qi_h, v_prod_qi_h, v_qi, v_h)
-            _covariance_from_moments!(cov_w_h, v_prod_w_h, v_w, v_h)
+            StatisticalMethods.covariance_from_moments!(cov_qt_ql, v_prod_qt_ql, v_qt, v_ql)
+            StatisticalMethods.covariance_from_moments!(cov_qt_qi, v_prod_qt_qi, v_qt, v_qi)
+            StatisticalMethods.covariance_from_moments!(cov_qt_w, v_prod_qt_w, v_qt, v_w)
+            StatisticalMethods.covariance_from_moments!(cov_qt_h, v_prod_qt_h, v_qt, v_h)
+            StatisticalMethods.covariance_from_moments!(cov_ql_qi, v_prod_ql_qi, v_ql, v_qi)
+            StatisticalMethods.covariance_from_moments!(cov_ql_w, v_prod_ql_w, v_ql, v_w)
+            StatisticalMethods.covariance_from_moments!(cov_ql_h, v_prod_ql_h, v_ql, v_h)
+            StatisticalMethods.covariance_from_moments!(cov_qi_w, v_prod_qi_w, v_qi, v_w)
+            StatisticalMethods.covariance_from_moments!(cov_qi_h, v_prod_qi_h, v_qi, v_h)
+            StatisticalMethods.covariance_from_moments!(cov_w_h, v_prod_w_h, v_w, v_h)
             empty_z_levels = CoarseGraining.identify_empty_z_levels_from_ql_qi(v_ql, v_qi, cloud_threshold)
             z_keep_mask = CoarseGraining.build_z_level_keep_mask(empty_z_levels, wz, future_z_empty)
             any(z_keep_mask) || continue

@@ -4,6 +4,7 @@ using Statistics: Statistics
 
 include("array_utils.jl")
 using .ArrayUtils
+using ..StatisticalMethods: StatisticalMethods
 
 @inline uniform_stride_for_valid_box(n::Int, w::Int, k::Int) = ArrayUtils.uniform_stride_for_valid_box(n, w, k)
 @inline valid_box_anchor_starts(n::Int, w::Int, k::Int) = ArrayUtils.valid_box_anchor_starts(n, w, k)
@@ -26,7 +27,11 @@ export build_horizontal_levels,
     uniform_stride_for_valid_box,
     valid_box_anchor_starts,
     covariance_from_moments,
-    build_horizontal_multilevel_views
+    build_horizontal_multilevel_views,
+    coarsen_products_moments_horizontal_native,
+    coarsen_moments_horizontal_merge,
+    coarsen_moments_vertical_merge,
+    coarsen_products_moments_3d_block
 
 """
     build_horizontal_levels(nx, ny, dx_native; seeds=(1,), min_h=0, include_full_domain=true)
@@ -171,7 +176,8 @@ function coarsen_products_3d_block(
         nyo = div(ny, fy)
         nzo = div(nz, fz)
         T = eltype(x)
-        inv_vol = one(T) / T(fx * fy * fz)
+        Acc = ArrayUtils._block_reduction_accum_type(T)
+        inv_vol = one(Acc) / Acc(fx * fy * fz)
         prod_coarse = similar(x, nxo, nyo, nzo)
 
         @inbounds for k in 1:nzo
@@ -180,18 +186,18 @@ function coarsen_products_3d_block(
                 base_j = (j - 1) * fy + 1
                 for i in 1:nxo
                     base_i = (i - 1) * fx + 1
-                    acc = zero(T)
+                    acc = zero(Acc)
                     for kk in 0:(fz - 1)
                         z = base_k + kk
                         for jj in 0:(fy - 1)
                             yidx = base_j + jj
                             for ii in 0:(fx - 1)
                                 xi = base_i + ii
-                                acc += x[xi, yidx, z] * y[xi, yidx, z]
+                                acc += Acc(x[xi, yidx, z]) * Acc(y[xi, yidx, z])
                             end
                         end
                     end
-                    prod_coarse[i, j, k] = acc * inv_vol
+                    prod_coarse[i, j, k] = T(acc * inv_vol)
                 end
             end
         end
@@ -372,19 +378,20 @@ function coarsen_products_at_level(
         nyo = div(ny, fy)
         prod_coarse = similar(x, nxo, nyo, nz)
         
-        inv_area = one(T) / T(fx * fy)
+        Acc = ArrayUtils._block_reduction_accum_type(T)
+        inv_area = one(Acc) / Acc(fx * fy)
         @inbounds for k in 1:nz
             for j in 1:nyo
                 base_j = (j - 1) * fy + 1
                 for i in 1:nxo
                     base_i = (i - 1) * fx + 1
-                    acc = zero(T)
+                    acc = zero(Acc)
                     for jj in 0:(fy - 1)
                         for ii in 0:(fx - 1)
-                            acc += x[base_i + ii, base_j + jj, k] * y[base_i + ii, base_j + jj, k]
+                            acc += Acc(x[base_i + ii, base_j + jj, k]) * Acc(y[base_i + ii, base_j + jj, k])
                         end
                     end
-                    prod_coarse[i, j, k] = acc * inv_area
+                    prod_coarse[i, j, k] = T(acc * inv_area)
                 end
             end
         end
@@ -419,19 +426,20 @@ function coarsen_products_at_level(
         prod_coarse = similar(x, nxo, nyo, nz)
 
         T = eltype(x)
-        inv_area = one(T) / T(fx * fy)
+        Acc = ArrayUtils._block_reduction_accum_type(T)
+        inv_area = one(Acc) / Acc(fx * fy)
         @inbounds for k in 1:nz
             for j in 1:nyo
                 base_j = (j - 1) * fy + 1
                 for i in 1:nxo
                     base_i = (i - 1) * fx + 1
-                    acc = zero(T)
+                    acc = zero(Acc)
                     for jj in 0:(fy - 1)
                         for ii in 0:(fx - 1)
-                            acc += x[base_i + ii, base_j + jj, k] * y[base_i + ii, base_j + jj, k]
+                            acc += Acc(x[base_i + ii, base_j + jj, k]) * Acc(y[base_i + ii, base_j + jj, k])
                         end
                     end
-                    prod_coarse[i, j, k] = acc * inv_area
+                    prod_coarse[i, j, k] = T(acc * inv_area)
                 end
             end
         end
@@ -440,18 +448,273 @@ function coarsen_products_at_level(
     return NamedTuple{PN}(vals)
 end
 
+function _coarsen3d_horizontal_merge_M2!(
+    out_M2::AbstractArray{T, 3},
+    mu::AbstractArray{T, 3},
+    M2::AbstractArray{T, 3},
+    fh::Int,
+    fv::Int,
+    n_each::Int,
+) where {T <: AbstractFloat}
+    nx, ny, nz = size(mu)
+    size(M2) == (nx, ny, nz) || throw(DimensionMismatch("M2 shape"))
+    nxo, nyo = div(nx, fh), div(ny, fv)
+    size(out_M2) == (nxo, nyo, nz) || throw(DimensionMismatch("out_M2 shape"))
+    kblk = fh * fv
+    # Wider scratch for Chan merge (same policy as `_block_reduction_accum_type` in array_utils).
+    Acc = ArrayUtils._block_reduction_accum_type(T)
+    buf_μ = Vector{Acc}(undef, kblk)
+    buf_M2 = Vector{Acc}(undef, kblk)
+    @inbounds for k in 1:nz
+        for j in 1:nyo
+            for i in 1:nxo
+                t = 1
+                for jj in 0:(fv - 1)
+                    for ii in 0:(fh - 1)
+                        buf_μ[t] = Acc(mu[(i - 1) * fh + ii + 1, (j - 1) * fv + jj + 1, k])
+                        buf_M2[t] = Acc(M2[(i - 1) * fh + ii + 1, (j - 1) * fv + jj + 1, k])
+                        t += 1
+                    end
+                end
+                _, _, M2p = StatisticalMethods.merge_variance_children(n_each, buf_μ, buf_M2)
+                out_M2[i, j, k] = T(M2p)
+            end
+        end
+    end
+    return out_M2
+end
+
+function _coarsen3d_vertical_merge_M2!(
+    out_M2::AbstractArray{T, 3},
+    mu::AbstractArray{T, 3},
+    M2::AbstractArray{T, 3},
+    fz::Int,
+    n_each::Int,
+) where {T <: AbstractFloat}
+    nx, ny, nz = size(mu)
+    nzo = div(nz, fz)
+    size(out_M2) == (nx, ny, nzo) || throw(DimensionMismatch("out_M2 shape"))
+    Acc = ArrayUtils._block_reduction_accum_type(T)
+    buf_μ = Vector{Acc}(undef, fz)
+    buf_M2 = Vector{Acc}(undef, fz)
+    @inbounds for k in 1:nzo
+        base_k = (k - 1) * fz + 1
+        for j in 1:ny
+            for i in 1:nx
+                for kk in 0:(fz - 1)
+                    buf_μ[kk + 1] = Acc(mu[i, j, base_k + kk])
+                    buf_M2[kk + 1] = Acc(M2[i, j, base_k + kk])
+                end
+                _, _, M2p = StatisticalMethods.merge_variance_children(n_each, buf_μ, buf_M2)
+                out_M2[i, j, k] = T(M2p)
+            end
+        end
+    end
+    return out_M2
+end
+
+function _coarsen3d_horizontal_merge_C!(
+    out_C::AbstractArray{T, 3},
+    mux::AbstractArray{T, 3},
+    muy::AbstractArray{T, 3},
+    C::AbstractArray{T, 3},
+    fh::Int,
+    fv::Int,
+    n_each::Int,
+) where {T <: AbstractFloat}
+    nx, ny, nz = size(mux)
+    size(muy) == (nx, ny, nz) || throw(DimensionMismatch("muy shape"))
+    size(C) == (nx, ny, nz) || throw(DimensionMismatch("C shape"))
+    nxo, nyo = div(nx, fh), div(ny, fv)
+    size(out_C) == (nxo, nyo, nz) || throw(DimensionMismatch("out_C shape"))
+    kblk = fh * fv
+    Acc = ArrayUtils._block_reduction_accum_type(T)
+    buf_x = Vector{Acc}(undef, kblk)
+    buf_y = Vector{Acc}(undef, kblk)
+    buf_C = Vector{Acc}(undef, kblk)
+    @inbounds for k in 1:nz
+        for j in 1:nyo
+            for i in 1:nxo
+                t = 1
+                for jj in 0:(fv - 1)
+                    for ii in 0:(fh - 1)
+                        ix = (i - 1) * fh + ii + 1
+                        iy = (j - 1) * fv + jj + 1
+                        buf_x[t] = Acc(mux[ix, iy, k])
+                        buf_y[t] = Acc(muy[ix, iy, k])
+                        buf_C[t] = Acc(C[ix, iy, k])
+                        t += 1
+                    end
+                end
+                _, _, _, Cp = StatisticalMethods.merge_covariance_children(n_each, buf_x, buf_y, buf_C)
+                out_C[i, j, k] = T(Cp)
+            end
+        end
+    end
+    return out_C
+end
+
+function _coarsen3d_vertical_merge_C!(
+    out_C::AbstractArray{T, 3},
+    mux::AbstractArray{T, 3},
+    muy::AbstractArray{T, 3},
+    C::AbstractArray{T, 3},
+    fz::Int,
+    n_each::Int,
+) where {T <: AbstractFloat}
+    nx, ny, nz = size(mux)
+    nzo = div(nz, fz)
+    size(out_C) == (nx, ny, nzo) || throw(DimensionMismatch("out_C shape"))
+    Acc = ArrayUtils._block_reduction_accum_type(T)
+    buf_x = Vector{Acc}(undef, fz)
+    buf_y = Vector{Acc}(undef, fz)
+    buf_C = Vector{Acc}(undef, fz)
+    @inbounds for k in 1:nzo
+        base_k = (k - 1) * fz + 1
+        for j in 1:ny
+            for i in 1:nx
+                for kk in 0:(fz - 1)
+                    buf_x[kk + 1] = Acc(mux[i, j, base_k + kk])
+                    buf_y[kk + 1] = Acc(muy[i, j, base_k + kk])
+                    buf_C[kk + 1] = Acc(C[i, j, base_k + kk])
+                end
+                _, _, _, Cp = StatisticalMethods.merge_covariance_children(n_each, buf_x, buf_y, buf_C)
+                out_C[i, j, k] = T(Cp)
+            end
+        end
+    end
+    return out_C
+end
+
+"""
+    coarsen_products_moments_horizontal_native(fields, product_pairs, nh)
+
+Horizontal `nh×nh` block stats at native vertical resolution: self-pairs return **M2** (sum of squared
+deviations); cross-pairs return **C** (sum of `(x−x̄)(y−ȳ)` within each block).
+"""
+function coarsen_products_moments_horizontal_native(
+    fields::NamedTuple{FN, FV},
+    product_pairs::NamedTuple{PN, PV},
+    nh::Int,
+) where {FN, FV <: Tuple, PN, PV <: Tuple}
+    vals = map(PN) do out_name
+        x_name, y_name = getproperty(product_pairs, out_name)
+        x = _container_get_field(fields, _field_name_key(x_name))
+        y = _container_get_field(fields, _field_name_key(y_name))
+        size(x) == size(y) || throw(DimensionMismatch("Fields for product $(out_name) have mismatched sizes"))
+        if x_name == y_name
+            _, M2 = ArrayUtils.conv3d_block_mean_M2(x, nh, nh, 1)
+            M2
+        else
+            _, _, C = ArrayUtils.conv3d_block_covariance_C(x, y, nh, nh, 1)
+            C
+        end
+    end
+    return NamedTuple{PN}(vals)
+end
+
+"""
+    coarsen_moments_horizontal_merge(means_src, moments_src, product_pairs, fh, fv, n_each)
+
+Chan/Pebay merge of child **M2** / **C** fields over `fh×fv` horizontal blocks. Child voxels each
+represent `n_each` samples.
+"""
+function coarsen_moments_horizontal_merge(
+    means_src::NamedTuple,
+    moments_src::NamedTuple{PN},
+    product_pairs::NamedTuple{PN},
+    fh::Int,
+    fv::Int,
+    n_each::Int,
+) where {PN}
+    vals = map(PN) do out_name
+        x_name, y_name = getproperty(product_pairs, out_name)
+        if x_name == y_name
+            μ = _container_get_field(means_src, _field_name_key(x_name))
+            M2c = getproperty(moments_src, out_name)
+            out = similar(μ, div(size(μ, 1), fh), div(size(μ, 2), fv), size(μ, 3))
+            _coarsen3d_horizontal_merge_M2!(out, μ, M2c, fh, fv, n_each)
+        else
+            mux = _container_get_field(means_src, _field_name_key(x_name))
+            muy = _container_get_field(means_src, _field_name_key(y_name))
+            Cc = getproperty(moments_src, out_name)
+            out = similar(mux, div(size(mux, 1), fh), div(size(mux, 2), fv), size(mux, 3))
+            _coarsen3d_horizontal_merge_C!(out, mux, muy, Cc, fh, fv, n_each)
+        end
+    end
+    return NamedTuple{PN}(vals)
+end
+
+"""
+    coarsen_moments_vertical_merge(means_src, moments_src, product_pairs, fz, n_each)
+
+Vertical Chan/Pebay merge along `z` in groups of `fz`. Each fine voxel represents `n_each` samples.
+"""
+function coarsen_moments_vertical_merge(
+    means_src::NamedTuple,
+    moments_src::NamedTuple{PN},
+    product_pairs::NamedTuple{PN},
+    fz::Int,
+    n_each::Int,
+) where {PN}
+    vals = map(PN) do out_name
+        x_name, y_name = getproperty(product_pairs, out_name)
+        if x_name == y_name
+            μ = _container_get_field(means_src, _field_name_key(x_name))
+            M2c = getproperty(moments_src, out_name)
+            out = similar(μ, size(μ, 1), size(μ, 2), div(size(μ, 3), fz))
+            _coarsen3d_vertical_merge_M2!(out, μ, M2c, fz, n_each)
+        else
+            mux = _container_get_field(means_src, _field_name_key(x_name))
+            muy = _container_get_field(means_src, _field_name_key(y_name))
+            Cc = getproperty(moments_src, out_name)
+            out = similar(mux, size(mux, 1), size(mux, 2), div(size(mux, 3), fz))
+            _coarsen3d_vertical_merge_C!(out, mux, muy, Cc, fz, n_each)
+        end
+    end
+    return NamedTuple{PN}(vals)
+end
+
+"""
+    coarsen_products_moments_3d_block(fields, product_pairs, fx, fy, fz)
+
+Full 3D block **M2** (self pairs) or **C** (cross pairs) from native fields (non-square tower path).
+"""
+function coarsen_products_moments_3d_block(
+    fields::NamedTuple{FN, FV},
+    product_pairs::NamedTuple{PN, PV},
+    fx::Int,
+    fy::Int,
+    fz::Int,
+) where {FN, FV <: Tuple, PN, PV <: Tuple}
+    vals = map(PN) do out_name
+        x_name, y_name = getproperty(product_pairs, out_name)
+        x = _container_get_field(fields, _field_name_key(x_name))
+        y = _container_get_field(fields, _field_name_key(y_name))
+        size(x) == size(y) || throw(DimensionMismatch("Fields for product $(out_name) have mismatched sizes"))
+        if x_name == y_name
+            _, M2 = ArrayUtils.conv3d_block_mean_M2(x, fx, fy, fz)
+            M2
+        else
+            _, _, C = ArrayUtils.conv3d_block_covariance_C(x, y, fx, fy, fz)
+            C
+        end
+    end
+    return NamedTuple{PN}(vals)
+end
+
 """
     covariance_from_moments(mean_xy, mean_x, mean_y)
 
-Compute covariance field as `<xy> - <x><y>`.
+Thin wrapper around [`StatisticalMethods.covariance_from_moments`](@ref) for callers that only load
+`CoarseningPipeline`.
 """
 function covariance_from_moments(
     mean_xy::AbstractArray{T, 3},
     mean_x::AbstractArray{T, 3},
     mean_y::AbstractArray{T, 3},
 ) where {T <: Real}
-    size(mean_xy) == size(mean_x) == size(mean_y) || throw(DimensionMismatch("moment arrays must share shape"))
-    return mean_xy .- (mean_x .* mean_y)
+    return StatisticalMethods.covariance_from_moments(mean_xy, mean_x, mean_y)
 end
 
 """

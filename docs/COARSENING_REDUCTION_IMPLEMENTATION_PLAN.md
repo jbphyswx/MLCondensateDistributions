@@ -2,7 +2,7 @@
 
 This document specifies a **multi-year / multi-PR** refactor of how we build multiscale training targets from LES fields. It replaces ad hoc `coarsening_mode` branches with **explicit reducer types**, adds **true sliding (convolutional) local moments**, and defines **truncated non-overlapping block tiling** so scales are chosen by **physics (Δh, Δz)** rather than by **divisors of `nx, ny, nz`**.
 
-Cross-reference: `VERTICAL_COARSENING_PLAN.md` (vertical ladder & z-dropping rules) — align z policy here with that doc where overlap exists.
+Cross-reference: `VERTICAL_COARSENING_PLAN.md` (vertical ladder & z-dropping rules) — align z policy here with that doc where overlap exists. **Moments / variance / covariance numerics** (Arrow `var_*`, `cov_*`, `tke`, Chan–Pebay merge): see [`MOMENTS_NUMERICS_PIPELINE.md`](MOMENTS_NUMERICS_PIPELINE.md).
 
 **Related planning artifact:** Cursor keeps a compact YAML-backed tracker for this effort at `~/.cursor/plans/coarsening_reduction_refactor_3b142058.plan.md` (phase checklist, mermaid sketch, code touchpoints). **This repo document remains canonical** for merged behavior and edge cases; the Cursor file is for editor-side tracking. When they diverge, update **this file** after each significant PR.
 
@@ -23,6 +23,7 @@ Cross-reference: `VERTICAL_COARSENING_PLAN.md` (vertical ladder & z-dropping rul
 | **Hybrid** | **Done** | Block pass + sliding extras from `hybrid_sliding_extra_sizes_default` / optional `hybrid_sliding_extra_sizes`; same `z_factors` as block for sliding loop. |
 | **Reducer types** | **Partial** | `AbstractReductionSpec` + structs live in **`utils/reduction_specs.jl`**. Orchestration is still **`if coarsening_mode`** in `dataset_builder_impl.jl`, not `process_chunk(::AbstractReductionSpec)`. |
 | **Docs / env** | **Partial** | `docs/googleles_build_tabular.md`, `experiments/amip_baseline/README.md` document modes and `MLCD_*`. `dataset_spec.md` / root README may still need grep for stale mode names. |
+| **Moments numerics** | **Done (2026-04)** | `docs/MOMENTS_NUMERICS_PIPELINE.md`: schema vs internal stats; Float64 accumulators in block/valid-box kernels; block tower uses Chan/Pebay merge (`utils/statistical_methods/`, `coarsening_pipeline.jl`, `dataset_builder_impl.jl`). |
 
 **Pivots vs early drafts**
 
@@ -123,7 +124,7 @@ For each output cell `(i,j,k)` and window `Wh×Wh×Wz` (square horizontal defaul
 
 - [x] **First-order** fields: local **mean** per valid box (`conv3d_valid_box_mean`, `*_at_starts`).
 - [x] **Products** for covariances / TKE: local **mean of `f*g`** on the same window (`conv3d_valid_box_product_mean`, `*_at_starts`).
-- [x] Same derived diagnostics as block path (`_covariance_from_moments!`, `_tke_from_moments!`, etc.) **per output cell**.
+- [x] Same derived diagnostics as block path (`StatisticalMethods.covariance_from_moments!`, `Dynamics.tke_field_from_velocity_moments!`, etc.) **per output cell**.
 
 ### 5.2 Naive implementation
 

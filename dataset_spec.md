@@ -50,5 +50,7 @@ The output `DataFrame` and serialized Arrow object is guaranteed to be construct
 | 35 | `forcing_model` | String | Metadata | Benchmark constraint boundary (e.g. `GFDL-CM4`) |
 | 36 | `experiment` | String | Metadata | Experiment type (e.g. `amip`) |
 
+**Second-moment columns (`tke`, all `var_*`, all `cov_*`).** Values are **population** variance / covariance per coarse voxel (and TKE built from those variances). Storage in Arrow remains **Float32**; the builder may use wider precision only while reducing and merging. Definitions, failure modes, and implementation pointers: [`docs/MOMENTS_NUMERICS_PIPELINE.md`](docs/MOMENTS_NUMERICS_PIPELINE.md).
+
 ## Validation
 Any testing pipelines or orchestration frameworks iterating over Arrow files output via `utils/dataset_builder.jl` are explicitly asserted against this specific 36-column map sequentially prior to payload serialization. If a specific structural variable array (like `ta`, `thetali` or `rhoa`) is physically missing from the underlying dataset chunk, the pipeline is designed to throw a hard fatal error. This ensures that the generated training data is mathematically complete and never contains silent `NaN` or interpolated anomalies.

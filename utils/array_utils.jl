@@ -29,9 +29,19 @@ export seed_factor_ladder,
     coarsen_fields_vertical,
     coarsen_dz_profile_2x,
     coarsen_dz_profile_factor,
-    full_domain_mean_3d
+    full_domain_mean_3d,
+    conv3d_block_mean_M2!,
+    conv3d_block_mean_M2,
+    conv3d_block_covariance_C!,
+    conv3d_block_covariance_C
 
 const ScheduleRow{T} = NamedTuple{(:factor, :resolution_h, :nx_out), Tuple{Int, T, Int}}
+
+# Wider scalar accumulators for ∑ / ∑(xy) when eltype is Float32 (see docs/MOMENTS_NUMERICS_PIPELINE.md).
+@inline function _block_reduction_accum_type(::Type{T}) where {T <: AbstractFloat}
+    return sizeof(T) < sizeof(Float64) ? Float64 : T
+end
+@inline _block_reduction_accum_type(::Type{T}) where {T} = T
 
 function _validate_odd_unique_seeds(seeds::NTuple{N, Int}) where {N}
     all(isodd, seeds) || throw(ArgumentError("All seeds must be odd, got seeds=$(seeds)"))
@@ -233,19 +243,20 @@ function coarsen2d_mean!(out::AbstractMatrix{T}, data::AbstractMatrix{T}, fx::In
     size(out, 1) == nxo || throw(DimensionMismatch("out size mismatch in dim 1"))
     size(out, 2) == nyo || throw(DimensionMismatch("out size mismatch in dim 2"))
 
-    inv_area = one(T) / T(fx * fy)
+    Acc = _block_reduction_accum_type(T)
+    inv_area = one(Acc) / Acc(fx * fy)
 
     @inbounds for j in 1:nyo
         base_j = (j - 1) * fy + 1
         for i in 1:nxo
             base_i = (i - 1) * fx + 1
-            acc = zero(T)
+            acc = zero(Acc)
             for jj in 0:(fy - 1)
                 for ii in 0:(fx - 1)
-                    acc += data[base_i + ii, base_j + jj]
+                    acc += Acc(data[base_i + ii, base_j + jj])
                 end
             end
-            out[i, j] = acc * inv_area
+            out[i, j] = T(acc * inv_area)
         end
     end
 
@@ -272,20 +283,21 @@ function coarsen3d_horizontal_mean!(out::AbstractArray{T, 3}, data::AbstractArra
     nyo = div(ny, fy)
     size(out) == (nxo, nyo, nz) || throw(DimensionMismatch("out size mismatch for 3D coarsening"))
 
-    inv_area = one(T) / T(fx * fy)
+    Acc = _block_reduction_accum_type(T)
+    inv_area = one(Acc) / Acc(fx * fy)
 
     @inbounds for k in 1:nz
         for j in 1:nyo
             base_j = (j - 1) * fy + 1
             for i in 1:nxo
                 base_i = (i - 1) * fx + 1
-                acc = zero(T)
+                acc = zero(Acc)
                 for jj in 0:(fy - 1)
                     for ii in 0:(fx - 1)
-                        acc += data[base_i + ii, base_j + jj, k]
+                        acc += Acc(data[base_i + ii, base_j + jj, k])
                     end
                 end
-                out[i, j, k] = acc * inv_area
+                out[i, j, k] = T(acc * inv_area)
             end
         end
     end
@@ -312,16 +324,17 @@ function coarsen3d_vertical_mean!(out::AbstractArray{T, 3}, data::AbstractArray{
     nzo = div(nz, fz)
     size(out) == (nx, ny, nzo) || throw(DimensionMismatch("out size mismatch for vertical 3D coarsening"))
 
-    inv_fz = one(T) / T(fz)
+    Acc = _block_reduction_accum_type(T)
+    inv_fz = one(Acc) / Acc(fz)
     @inbounds for k in 1:nzo
         base_k = (k - 1) * fz + 1
         for j in 1:ny
             for i in 1:nx
-                acc = zero(T)
+                acc = zero(Acc)
                 for kk in 0:(fz - 1)
-                    acc += data[i, j, base_k + kk]
+                    acc += Acc(data[i, j, base_k + kk])
                 end
-                out[i, j, k] = acc * inv_fz
+                out[i, j, k] = T(acc * inv_fz)
             end
         end
     end
@@ -366,25 +379,26 @@ function conv3d_block_mean!(
     nzo = div(nz, fz)
     size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch for conv3d_block_mean"))
 
-    inv_vol = one(T) / T(fx * fy * fz)
+    Acc = _block_reduction_accum_type(T)
+    inv_vol = one(Acc) / Acc(fx * fy * fz)
     @inbounds for k in 1:nzo
         base_k = (k - 1) * fz + 1
         for j in 1:nyo
             base_j = (j - 1) * fy + 1
             for i in 1:nxo
                 base_i = (i - 1) * fx + 1
-                acc = zero(T)
+                acc = zero(Acc)
                 for kk in 0:(fz - 1)
                     z = base_k + kk
                     for jj in 0:(fy - 1)
                         y = base_j + jj
                         for ii in 0:(fx - 1)
                             x = base_i + ii
-                            acc += data[x, y, z]
+                            acc += Acc(data[x, y, z])
                         end
                     end
                 end
-                out[i, j, k] = acc * inv_vol
+                out[i, j, k] = T(acc * inv_vol)
             end
         end
     end
@@ -395,6 +409,155 @@ function conv3d_block_mean(data::AbstractArray{T, 3}, fx::Int, fy::Int, fz::Int)
     nx, ny, nz = size(data)
     out = similar(data, div(nx, fx), div(ny, fy), div(nz, fz))
     return conv3d_block_mean!(out, data, fx, fy, fz)
+end
+
+"""
+    conv3d_block_mean_M2!(out_mean, out_M2, data, fx, fy, fz)
+
+Per `fx×fy×fz` block: `out_mean` is the block mean of `data`; `out_M2` is `Σ (x − x̄)²` over the
+block (population sum of squared deviations). Uses `Float64` intermediates when `T === Float32`.
+"""
+function conv3d_block_mean_M2!(
+    out_mean::AbstractArray{T, 3},
+    out_M2::AbstractArray{T, 3},
+    data::AbstractArray{T, 3},
+    fx::Int,
+    fy::Int,
+    fz::Int,
+) where {T <: Real}
+    fx >= 1 || throw(ArgumentError("fx must be >= 1"))
+    fy >= 1 || throw(ArgumentError("fy must be >= 1"))
+    fz >= 1 || throw(ArgumentError("fz must be >= 1"))
+    nx, ny, nz = size(data)
+    nxo = div(nx, fx)
+    nyo = div(ny, fy)
+    nzo = div(nz, fz)
+    size(out_mean) == (nxo, nyo, nzo) || throw(DimensionMismatch("out_mean size mismatch"))
+    size(out_M2) == (nxo, nyo, nzo) || throw(DimensionMismatch("out_M2 size mismatch"))
+    Acc = _block_reduction_accum_type(T)
+    inv_vol = one(Acc) / Acc(fx * fy * fz)
+    @inbounds for k in 1:nzo
+        base_k = (k - 1) * fz + 1
+        for j in 1:nyo
+            base_j = (j - 1) * fy + 1
+            for i in 1:nxo
+                base_i = (i - 1) * fx + 1
+                acc = zero(Acc)
+                for kk in 0:(fz - 1)
+                    z = base_k + kk
+                    for jj in 0:(fy - 1)
+                        y = base_j + jj
+                        for ii in 0:(fx - 1)
+                            x = base_i + ii
+                            acc += Acc(data[x, y, z])
+                        end
+                    end
+                end
+                μ = acc * inv_vol
+                out_mean[i, j, k] = T(μ)
+                s2 = zero(Acc)
+                for kk in 0:(fz - 1)
+                    z = base_k + kk
+                    for jj in 0:(fy - 1)
+                        y = base_j + jj
+                        for ii in 0:(fx - 1)
+                            x = base_i + ii
+                            d = Acc(data[x, y, z]) - μ
+                            s2 += d * d
+                        end
+                    end
+                end
+                out_M2[i, j, k] = T(s2)
+            end
+        end
+    end
+    return out_mean, out_M2
+end
+
+function conv3d_block_mean_M2(data::AbstractArray{T, 3}, fx::Int, fy::Int, fz::Int) where {T <: Real}
+    nx, ny, nz = size(data)
+    sh = (div(nx, fx), div(ny, fy), div(nz, fz))
+    out_m = similar(data, sh)
+    out_s = similar(data, sh)
+    return conv3d_block_mean_M2!(out_m, out_s, data, fx, fy, fz)
+end
+
+"""
+    conv3d_block_covariance_C!(out_mx, out_my, out_C, x, y, fx, fy, fz)
+
+Per block: means of `x`, `y`, and `C = Σ (x−x̄)(y−ȳ)` (population covariance numerator).
+"""
+function conv3d_block_covariance_C!(
+    out_mx::AbstractArray{T, 3},
+    out_my::AbstractArray{T, 3},
+    out_C::AbstractArray{T, 3},
+    x::AbstractArray{T, 3},
+    y::AbstractArray{T, 3},
+    fx::Int,
+    fy::Int,
+    fz::Int,
+) where {T <: Real}
+    size(x) == size(y) || throw(DimensionMismatch("x and y shape"))
+    fx >= 1 && fy >= 1 && fz >= 1 || throw(ArgumentError("factors must be >= 1"))
+    nx, ny, nz = size(x)
+    nxo = div(nx, fx)
+    nyo = div(ny, fy)
+    nzo = div(nz, fz)
+    size(out_mx) == (nxo, nyo, nzo) || throw(DimensionMismatch("out_mx"))
+    size(out_my) == (nxo, nyo, nzo) || throw(DimensionMismatch("out_my"))
+    size(out_C) == (nxo, nyo, nzo) || throw(DimensionMismatch("out_C"))
+    Acc = _block_reduction_accum_type(T)
+    inv_vol = one(Acc) / Acc(fx * fy * fz)
+    @inbounds for k in 1:nzo
+        base_k = (k - 1) * fz + 1
+        for j in 1:nyo
+            base_j = (j - 1) * fy + 1
+            for i in 1:nxo
+                base_i = (i - 1) * fx + 1
+                acc_x = zero(Acc)
+                acc_y = zero(Acc)
+                for kk in 0:(fz - 1)
+                    z = base_k + kk
+                    for jj in 0:(fy - 1)
+                        yy = base_j + jj
+                        for ii in 0:(fx - 1)
+                            xi = base_i + ii
+                            acc_x += Acc(x[xi, yy, z])
+                            acc_y += Acc(y[xi, yy, z])
+                        end
+                    end
+                end
+                μx = acc_x * inv_vol
+                μy = acc_y * inv_vol
+                out_mx[i, j, k] = T(μx)
+                out_my[i, j, k] = T(μy)
+                cacc = zero(Acc)
+                for kk in 0:(fz - 1)
+                    z = base_k + kk
+                    for jj in 0:(fy - 1)
+                        yy = base_j + jj
+                        for ii in 0:(fx - 1)
+                            xi = base_i + ii
+                            dx = Acc(x[xi, yy, z]) - μx
+                            dy = Acc(y[xi, yy, z]) - μy
+                            cacc += dx * dy
+                        end
+                    end
+                end
+                out_C[i, j, k] = T(cacc)
+            end
+        end
+    end
+    return out_mx, out_my, out_C
+end
+
+function conv3d_block_covariance_C(x::AbstractArray{T, 3}, y::AbstractArray{T, 3}, fx::Int, fy::Int, fz::Int) where {T <: Real}
+    nx, ny, nz = size(x)
+    sh = (div(nx, fx), div(ny, fy), div(nz, fz))
+    ox = similar(x, sh)
+    oy = similar(x, sh)
+    oc = similar(x, sh)
+    return conv3d_block_covariance_C!(ox, oy, oc, x, y, fx, fy, fz)
 end
 
 """
@@ -482,7 +645,8 @@ function conv3d_valid_box_mean_at_starts!(
     nx, ny, nz = size(data)
     nxo, nyo, nzo = length(ix), length(iy), length(iz)
     size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch for conv3d_valid_box_mean_at_starts"))
-    inv_vol = one(T) / T(wx * wy * wz)
+    Acc = _block_reduction_accum_type(T)
+    inv_vol = one(Acc) / Acc(wx * wy * wz)
     @inbounds for koz in 1:nzo
         k0 = iz[koz]
         (k0 >= 1 && k0 + wz - 1 <= nz) || throw(DimensionMismatch("z anchor out of bounds"))
@@ -492,18 +656,18 @@ function conv3d_valid_box_mean_at_starts!(
             for ioz in 1:nxo
                 i0 = ix[ioz]
                 (i0 >= 1 && i0 + wx - 1 <= nx) || throw(DimensionMismatch("x anchor out of bounds"))
-                acc = zero(T)
+                acc = zero(Acc)
                 for kk in 0:(wz - 1)
                     z = k0 + kk
                     for jj in 0:(wy - 1)
                         y = j0 + jj
                         for ii in 0:(wx - 1)
                             x = i0 + ii
-                            acc += data[x, y, z]
+                            acc += Acc(data[x, y, z])
                         end
                     end
                 end
-                out[ioz, joz, koz] = acc * inv_vol
+                out[ioz, joz, koz] = T(acc * inv_vol)
             end
         end
     end
@@ -539,7 +703,8 @@ function conv3d_valid_box_product_mean_at_starts!(
     nx, ny, nz = size(x)
     nxo, nyo, nzo = length(ix), length(iy), length(iz)
     size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch"))
-    inv_vol = one(T) / T(wx * wy * wz)
+    Acc = _block_reduction_accum_type(T)
+    inv_vol = one(Acc) / Acc(wx * wy * wz)
     @inbounds for koz in 1:nzo
         k0 = iz[koz]
         (k0 >= 1 && k0 + wz - 1 <= nz) || throw(DimensionMismatch("z anchor out of bounds"))
@@ -549,18 +714,18 @@ function conv3d_valid_box_product_mean_at_starts!(
             for ioz in 1:nxo
                 i0 = ix[ioz]
                 (i0 >= 1 && i0 + wx - 1 <= nx) || throw(DimensionMismatch("x anchor out of bounds"))
-                acc = zero(T)
+                acc = zero(Acc)
                 for kk in 0:(wz - 1)
                     z = k0 + kk
                     for jj in 0:(wy - 1)
                         yy = j0 + jj
                         for ii in 0:(wx - 1)
                             xi = i0 + ii
-                            acc += x[xi, yy, z] * y[xi, yy, z]
+                            acc += Acc(x[xi, yy, z]) * Acc(y[xi, yy, z])
                         end
                     end
                 end
-                out[ioz, joz, koz] = acc * inv_vol
+                out[ioz, joz, koz] = T(acc * inv_vol)
             end
         end
     end
@@ -606,7 +771,8 @@ function conv3d_valid_box_mean!(
     nzo = valid_box_output_extent(nz, wz, stride_z)
     (nxo == 0 || nyo == 0 || nzo == 0) && throw(DimensionMismatch("window too large for data"))
     size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch for conv3d_valid_box_mean"))
-    inv_vol = one(T) / T(wx * wy * wz)
+    Acc = _block_reduction_accum_type(T)
+    inv_vol = one(Acc) / Acc(wx * wy * wz)
     if nthreads() > 1 && nxo * nyo * nzo >= 2048
         @threads for io in 1:nxo
             i0 = 1 + (io - 1) * stride_h
@@ -614,18 +780,18 @@ function conv3d_valid_box_mean!(
                 k0 = 1 + (ko - 1) * stride_z
                 for jo in 1:nyo
                     j0 = 1 + (jo - 1) * stride_v
-                    acc = zero(T)
+                    acc = zero(Acc)
                     for kk in 0:(wz - 1)
                         z = k0 + kk
                         for jj in 0:(wy - 1)
                             y = j0 + jj
                             for ii in 0:(wx - 1)
                                 x = i0 + ii
-                                acc += data[x, y, z]
+                                acc += Acc(data[x, y, z])
                             end
                         end
                     end
-                    out[io, jo, ko] = acc * inv_vol
+                    out[io, jo, ko] = T(acc * inv_vol)
                 end
             end
         end
@@ -636,18 +802,18 @@ function conv3d_valid_box_mean!(
                 j0 = 1 + (jo - 1) * stride_v
                 for io in 1:nxo
                     i0 = 1 + (io - 1) * stride_h
-                    acc = zero(T)
+                    acc = zero(Acc)
                     for kk in 0:(wz - 1)
                         z = k0 + kk
                         for jj in 0:(wy - 1)
                             y = j0 + jj
                             for ii in 0:(wx - 1)
                                 x = i0 + ii
-                                acc += data[x, y, z]
+                                acc += Acc(data[x, y, z])
                             end
                         end
                     end
-                    out[io, jo, ko] = acc * inv_vol
+                    out[io, jo, ko] = T(acc * inv_vol)
                 end
             end
         end
@@ -693,7 +859,8 @@ function conv3d_valid_box_product_mean!(
     nzo = valid_box_output_extent(nz, wz, stride_z)
     (nxo == 0 || nyo == 0 || nzo == 0) && throw(DimensionMismatch("window too large for data"))
     size(out) == (nxo, nyo, nzo) || throw(DimensionMismatch("out size mismatch"))
-    inv_vol = one(T) / T(wx * wy * wz)
+    Acc = _block_reduction_accum_type(T)
+    inv_vol = one(Acc) / Acc(wx * wy * wz)
     if nthreads() > 1 && nxo * nyo * nzo >= 2048
         @threads for io in 1:nxo
             i0 = 1 + (io - 1) * stride_h
@@ -701,18 +868,18 @@ function conv3d_valid_box_product_mean!(
                 k0 = 1 + (ko - 1) * stride_z
                 for jo in 1:nyo
                     j0 = 1 + (jo - 1) * stride_v
-                    acc = zero(T)
+                    acc = zero(Acc)
                     for kk in 0:(wz - 1)
                         z = k0 + kk
                         for jj in 0:(wy - 1)
                             yy = j0 + jj
                             for ii in 0:(wx - 1)
                                 xi = i0 + ii
-                                acc += x[xi, yy, z] * y[xi, yy, z]
+                                acc += Acc(x[xi, yy, z]) * Acc(y[xi, yy, z])
                             end
                         end
                     end
-                    out[io, jo, ko] = acc * inv_vol
+                    out[io, jo, ko] = T(acc * inv_vol)
                 end
             end
         end
@@ -723,18 +890,18 @@ function conv3d_valid_box_product_mean!(
                 j0 = 1 + (jo - 1) * stride_v
                 for io in 1:nxo
                     i0 = 1 + (io - 1) * stride_h
-                    acc = zero(T)
+                    acc = zero(Acc)
                     for kk in 0:(wz - 1)
                         z = k0 + kk
                         for jj in 0:(wy - 1)
                             yy = j0 + jj
                             for ii in 0:(wx - 1)
                                 xi = i0 + ii
-                                acc += x[xi, yy, z] * y[xi, yy, z]
+                                acc += Acc(x[xi, yy, z]) * Acc(y[xi, yy, z])
                             end
                         end
                     end
-                    out[io, jo, ko] = acc * inv_vol
+                    out[io, jo, ko] = T(acc * inv_vol)
                 end
             end
         end

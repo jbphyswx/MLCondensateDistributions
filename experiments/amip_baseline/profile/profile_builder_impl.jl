@@ -20,7 +20,10 @@ using DataFrames
 
 const ROOT = abspath(joinpath(@__DIR__, "..", "..", ".."))
 include(joinpath(ROOT, "src", "MLCondensateDistributions.jl"))
-using .MLCondensateDistributions
+# After `include`, use leading `.` so names resolve in `Main` (not the package registry).
+using .MLCondensateDistributions:
+    MLCondensateDistributions as MLCD, DatasetBuilder as DB, StatisticalMethods as SM, Dynamics as DYN
+using .DB: DatasetBuilderImpl as DBI
 
 const NX = parse(Int, get(ENV, "NX", "124"))
 const NY = parse(Int, get(ENV, "NY", "124"))
@@ -29,10 +32,6 @@ const DX = parse(Float32, get(ENV, "DX", "50"))
 const MIN_H = parse(Float32, get(ENV, "MIN_H", "1000"))
 const REPEATS = parse(Int, get(ENV, "REPEATS", "3"))
 const SEED = parse(Int, get(ENV, "SEED", "42"))
-
-const DB = MLCondensateDistributions.DatasetBuilder
-const DBI = MLCondensateDistributions.DatasetBuilderImpl
-const CPI = MLCondensateDistributions.DatasetBuilderImpl.CoarseningPipeline
 
 function make_inputs()
     Random.seed!(SEED)
@@ -137,24 +136,21 @@ function run_benchmark()
     fine_fields, metadata, spatial_info = make_inputs()
     fields, product_pairs = build_impl_stage_inputs(fine_fields, spatial_info)
 
-    oldf = DB.process_abstract_chunk
-    newf = DBI.process_abstract_chunk_impl
+    # `DatasetBuilder.process_abstract_chunk` is only a thin @inline forwarder to
+    # `DatasetBuilderImpl.process_abstract_chunk_impl`; timing both is redundant.
+    chunk! = DB.process_abstract_chunk
 
-    # Warmup
-    oldf(fine_fields, metadata, spatial_info)
-    newf(fine_fields, metadata, spatial_info)
+    chunk!(fine_fields, metadata, spatial_info)  # warmup
 
-    println("== Old vs Impl Timing ==")
+    println("== DatasetBuilder.process_abstract_chunk timing ==")
     for i in 1:REPEATS
-        told = @elapsed dfo = oldf(fine_fields, metadata, spatial_info)
-        tnew = @elapsed dfn = newf(fine_fields, metadata, spatial_info)
-        println("run=", i, " old_s=", told, " new_s=", tnew, " old_rows=", nrow(dfo), " new_rows=", nrow(dfn))
+        t = @elapsed df = chunk!(fine_fields, metadata, spatial_info)
+        println("run=", i, " chunk_s=", t, " rows=", nrow(df))
     end
 
-    aold = @allocated oldf(fine_fields, metadata, spatial_info)
-    anew = @allocated newf(fine_fields, metadata, spatial_info)
+    a_chunk = @allocated chunk!(fine_fields, metadata, spatial_info)
 
-    hv = CPI.build_horizontal_multilevel_views(
+    hv = DBI.CoarseningPipeline.build_horizontal_multilevel_views(
         fields,
         Float32(spatial_info[:dx_native]);
         seeds=(1,),
@@ -163,7 +159,7 @@ function run_benchmark()
         product_pairs=product_pairs,
     )
 
-    ahviews = @allocated CPI.build_horizontal_multilevel_views(
+    ahviews = @allocated DBI.CoarseningPipeline.build_horizontal_multilevel_views(
         fields,
         Float32(spatial_info[:dx_native]);
         seeds=(1,),
@@ -206,18 +202,18 @@ function run_benchmark()
 
     amoments = @allocated begin
         tke = similar(v_qt)
-        DBI._tke_from_moments!(tke, vp_uu, h1.means["ua"], vp_vv, h1.means["va"], vp_ww, v_w)
+        DYN.tke_field_from_velocity_moments!(tke, vp_uu, h1.means["ua"], vp_vv, h1.means["va"], vp_ww, v_w)
 
         var_qt = similar(v_qt)
         var_ql = similar(v_qt)
         var_qi = similar(v_qt)
         var_w = similar(v_qt)
         var_h = similar(v_qt)
-        DBI._covariance_from_moments!(var_qt, vp_qtqt, v_qt, v_qt)
-        DBI._covariance_from_moments!(var_ql, vp_qlql, v_ql, v_ql)
-        DBI._covariance_from_moments!(var_qi, vp_qiqi, v_qi, v_qi)
-        DBI._covariance_from_moments!(var_w, vp_ww, v_w, v_w)
-        DBI._covariance_from_moments!(var_h, vp_hh, v_h, v_h)
+        SM.covariance_from_moments!(var_qt, vp_qtqt, v_qt, v_qt)
+        SM.covariance_from_moments!(var_ql, vp_qlql, v_ql, v_ql)
+        SM.covariance_from_moments!(var_qi, vp_qiqi, v_qi, v_qi)
+        SM.covariance_from_moments!(var_w, vp_ww, v_w, v_w)
+        SM.covariance_from_moments!(var_h, vp_hh, v_h, v_h)
 
         cov_qt_ql = similar(v_qt)
         cov_qt_qi = similar(v_qt)
@@ -229,16 +225,16 @@ function run_benchmark()
         cov_qi_w = similar(v_qt)
         cov_qi_h = similar(v_qt)
         cov_w_h = similar(v_qt)
-        DBI._covariance_from_moments!(cov_qt_ql, vp_qtql, v_qt, v_ql)
-        DBI._covariance_from_moments!(cov_qt_qi, vp_qtqi, v_qt, v_qi)
-        DBI._covariance_from_moments!(cov_qt_w, vp_qtw, v_qt, v_w)
-        DBI._covariance_from_moments!(cov_qt_h, vp_qth, v_qt, v_h)
-        DBI._covariance_from_moments!(cov_ql_qi, vp_qlqi, v_ql, v_qi)
-        DBI._covariance_from_moments!(cov_ql_w, vp_qlw, v_ql, v_w)
-        DBI._covariance_from_moments!(cov_ql_h, vp_qlh, v_ql, v_h)
-        DBI._covariance_from_moments!(cov_qi_w, vp_qiw, v_qi, v_w)
-        DBI._covariance_from_moments!(cov_qi_h, vp_qih, v_qi, v_h)
-        DBI._covariance_from_moments!(cov_w_h, vp_wh, v_w, v_h)
+        SM.covariance_from_moments!(cov_qt_ql, vp_qtql, v_qt, v_ql)
+        SM.covariance_from_moments!(cov_qt_qi, vp_qtqi, v_qt, v_qi)
+        SM.covariance_from_moments!(cov_qt_w, vp_qtw, v_qt, v_w)
+        SM.covariance_from_moments!(cov_qt_h, vp_qth, v_qt, v_h)
+        SM.covariance_from_moments!(cov_ql_qi, vp_qlqi, v_ql, v_qi)
+        SM.covariance_from_moments!(cov_ql_w, vp_qlw, v_ql, v_w)
+        SM.covariance_from_moments!(cov_ql_h, vp_qlh, v_ql, v_h)
+        SM.covariance_from_moments!(cov_qi_w, vp_qiw, v_qi, v_w)
+        SM.covariance_from_moments!(cov_qi_h, vp_qih, v_qi, v_h)
+        SM.covariance_from_moments!(cov_w_h, vp_wh, v_w, v_h)
     end
 
     amasks_flat = @allocated begin
@@ -306,7 +302,7 @@ function run_benchmark()
 
     println("== Allocation Breakdown (bytes) ==")
     println("hviews=", ahviews, " moments=", amoments, " masks_flat=", amasks_flat)
-    println("alloc_total_old=", aold, " alloc_total_new=", anew)
+    println("alloc_chunk=", a_chunk)
 end
 
 println("== profile_v2_builder ==")

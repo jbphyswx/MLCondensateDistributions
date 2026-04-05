@@ -8,6 +8,8 @@
     - `utils/dataset_builder_impl.jl`: `spatial_info.coarsening_mode` is `:hybrid`, `:block`, or `:sliding`.
 
     To experiment in a script:
+        include(joinpath(path_to_pkg, "utils", "statistical_methods", "StatisticalMethods.jl"))
+        using .StatisticalMethods
         include(joinpath(path_to_pkg, "utils", "coarsening_pipeline.jl"))
         using .CoarseningPipeline
 =#

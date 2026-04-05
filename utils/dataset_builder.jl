@@ -3,11 +3,13 @@ module DatasetBuilder
 using DataFrames: DataFrames
 using ..CoarseGraining: CoarseGraining
 using ..Dynamics: Dynamics
+using ..StatisticalMethods: StatisticalMethods
 
 include("reduction_specs.jl")
 using .ReductionSpecs
 
-export process_abstract_chunk, SCHEMA_SYMBOL_ORDER, DATASET_SPEC_CODE_NAMES, ReductionSpecs, DatasetBuilderImpl
+export process_abstract_chunk, SCHEMA_SYMBOL_ORDER, DATASET_SPEC_CODE_NAMES, ReductionSpecs, DatasetBuilderImpl,
+    StatisticalMethods
 
 const CLOUD_PRESENCE_THRESHOLD = 1f-10
 
