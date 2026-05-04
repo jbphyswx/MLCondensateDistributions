@@ -1,0 +1,15 @@
+name: MLCondensate
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python>=3.10,<3.14
+  - pytorch::pytorch
+  - pandas
+  - numpy
+  - pyarrow
+  - matplotlib
+  - pytest
+  - pip
+  - pip:
+      - -e .

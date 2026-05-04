@@ -1,0 +1,46 @@
+name = "MLCondensateDistributions"
+uuid = "7c54ba8f-093f-4729-83e1-3e38b97e2ff2"
+authors = ["jbenjami"]
+
+[workspace]
+projects = ["test"]
+
+[sources]
+SwirlLMCloudBench = {path = "/net/sampo/data1/jbenjami/Research_Schneider/CliMA/SwirlLMCloudBench/SwirlLMCloudBench.jl"}
+
+[deps]
+Arrow = "69666777-d1a9-59fb-9406-91d4454c9d45"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+DimensionalData = "0703355e-b756-11e9-17c0-8b28908087d0"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+Lux = "b2108857-7c20-44ae-9111-449ecde12c47"
+NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
+OhMyThreads = "67456a42-1dca-4109-a031-0a68de7e3ad5"
+Optimisers = "3bd65402-5787-11e9-1adc-39752487f4e2"
+Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+SimpleChains = "de6bee2f-e2f4-4ec7-b6ed-219cc6f6e9e5"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+SwirlLMCloudBench = "4f4bb049-d08d-4796-8bfd-29fb09dac0f0"
+Thermodynamics = "b60c26fb-14c3-4610-9d3e-2d17fe7ff00c"
+Zarr = "0a941bbe-ad1d-11e8-39d9-ab76183a1d99"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
+
+[weakdeps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[extensions]
+CairoMakieExt = ["CairoMakie", "Printf"]
+
+[compat]
+CairoMakie = "0.15.9"
+Dates = "1.11.0"
+Parquet2 = "0.2.33"
+Printf = "1.11.0"
+Random = "1.11.0"
+Serialization = "1.11.0"
+Statistics = "1.11.1"
+SwirlLMCloudBench = "0.1.0"

@@ -1,7 +1,7 @@
 # Vertical Coarsening Implementation Plan
 
 ## Current State
-- **Horizontal coarsening**: ✅ Implemented. Starts at `min_h_resolution` (1 km), does binary 2x reduction steps upward until tiny or no condensate.
+- **Horizontal coarsening**: ✅ Implemented. Starts at `min_dh` (1 km), does binary 2x reduction steps upward until tiny or no condensate.
 - **Vertical coarsening**: ❌ NOT implemented. Code loads full vertical grid, reads `dz_profile`, stores as metadata, but never coarsens in z.
 - **Sparsity dropping**: Partial. Currently drops empty (x,y) cells; does NOT drop empty z-levels.
 
@@ -57,7 +57,7 @@ Each (horizontal_resolution, vertical_resolution) pair produces a separate set o
 **Changes**:
 1. After horizontal coarsening setup, compute vertical coarsening schedule:
    ```julia
-   v_scheme = compute_z_coarsening_scheme(spatial_info[:dz_native_profile], max_dz=400f0)
+   v_scheme = compute_z_coarsening_scheme(spatial_info[:dz_native_profile], max_dz)
    # Returns: [(z_reduction_level, multiplier, effective_dz), ...]
    ```
 
